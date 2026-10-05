@@ -18,6 +18,8 @@ export type Evidence = {
   gbp?: { query: string; provider: string; place: Place | null; candidates: Place[]; at: string };
   /** MSO: one GBP lookup per location (same order as collection.locations) */
   gbpLocs?: { query: string; provider: string; place: Place | null; candidates: Place[]; at: string }[];
+  /** GBP links / map embeds found on the shop's own website (free — no search credits) */
+  gbpSite?: { url: string; found: SiteGbp[]; at: string };
   website?: { url: string; finalUrl: string; pages: { url: string; title: string; text: string }[]; socials: string[]; signals: Record<string, unknown>; at: string };
   search?: { queries: string[]; provider: string; results: WebResult[]; at: string };
 };
@@ -70,41 +72,55 @@ export async function stepGbp(c: Collection, ev: Evidence): Promise<string> {
   const { maps } = await searchAvailable();
   let place: Place | null = null, candidates: Place[] = [], provider = "", query = "";
 
+  // 0) Free: the GBP link / map embed on their own website, or a link pasted in the field
+  const site = pickSiteGbp(await gbpFromWebsite(c, ev), name);
+  const pasted = c.fields.gbpLink.value && !/maps\?cid=\d+$/.test(c.fields.gbpLink.value) ? await resolveGbpLink(c.fields.gbpLink.value).catch(() => null) : null;
+  const known = pasted || site;
+
+  let searchErr = "";
   if (maps) {
-    const score = (p: Place) => nameSimilarity(name, p.title) * 2 + (jiraAddr.match(/\d{5}/)?.[0] && p.address.includes(jiraAddr.match(/\d{5}/)![0]) ? 1 : 0) + (jiraAddr.match(/^\d+/)?.[0] && p.address.startsWith(jiraAddr.match(/^\d+/)![0]) ? 1 : 0);
+    const score = (p: Place) => nameSimilarity(name, p.title) * 2 + (jiraAddr.match(/\d{5}/)?.[0] && p.address.includes(jiraAddr.match(/\d{5}/)![0]) ? 1 : 0) + (jiraAddr.match(/^\d+/)?.[0] && p.address.startsWith(jiraAddr.match(/^\d+/)![0]) ? 1 : 0)
+      + (known && ((known.cid && p.cid === known.cid) || (known.placeId && p.placeId === known.placeId)) ? 3 : 0);
     query = `${name} ${jiraAddr || c.fields.cityState.value}`.trim();
-    let r = ev.gbp?.query === query ? { places: ev.gbp.candidates, provider: ev.gbp.provider } : await mapsSearch(query);
-    provider = r.provider; candidates = r.places;
-    if (!candidates.length || Math.max(...candidates.map(score)) < 1.5) {
-      const q2 = `${name} ${c.fields.cityState.value}`.trim();
-      if (q2 !== query) { r = await mapsSearch(q2); candidates = [...candidates, ...r.places]; query = q2; }
-    }
-    const best = [...candidates].sort((a, b) => score(b) - score(a))[0];
-    if (best && score(best) >= 1.2) place = best;
-  } else if (c.fields.gbpLink.value) {
-    place = await resolveGbpLink(c.fields.gbpLink.value);
-    provider = "GBP link";
-  } else {
-    ev.gbp = { query: "", provider: "", place: null, candidates: [], at: now() };
-    patch(c, "gbpLink", { note: "No Maps search key set up (Settings → Research). Paste the GBP link and run this step again — the CID and Place ID are read from it.", source: "", status: "review" });
-    return "Skipped — no Maps search key; paste the GBP link to continue";
+    try {
+      let r = ev.gbp?.query === query && ev.gbp.candidates.length ? { places: ev.gbp.candidates, provider: ev.gbp.provider } : await mapsSearch(query);
+      provider = r.provider; candidates = r.places;
+      if (!candidates.length || Math.max(...candidates.map(score)) < 1.5) {
+        const q2 = `${name} ${c.fields.cityState.value}`.trim();
+        if (q2 !== query) { r = await mapsSearch(q2); candidates = [...candidates, ...r.places]; query = q2; }
+      }
+      const best = [...candidates].sort((a, b) => score(b) - score(a))[0];
+      if (best && score(best) >= 1.2) place = best;
+    } catch (e) { searchErr = (e as Error).message.slice(0, 160); }
   }
   ev.gbp = { query, provider, place, candidates: candidates.slice(0, 5), at: now() };
 
-  if (!place) {
-    patch(c, "gbpLink", { note: `Couldn't confidently match a Google Business Profile${candidates.length ? ` (closest: ${candidates.slice(0, 3).map((p) => `${p.title} — ${p.address}`).join("; ")})` : ""}. Find it manually and paste the link.`, source: "gbp", status: "review" });
-    return "No confident GBP match";
+  if (place) {
+    applyGbpPlace(c, place);
+    if (known && ((known.cid && place.cid && known.cid !== place.cid) || (known.placeId && place.placeId && known.placeId !== place.placeId)))
+      patch(c, "gbpLink", { note: `Their website links to a different Google listing (${known.cid ? `cid ${known.cid}` : known.placeId}) — maybe an old one. Confirm which is current.`, source: "gbp", status: "review" });
+    return `Matched "${place.title}" via ${provider}${site ? " (confirmed by their website's map)" : ""}`;
   }
-
-  applyGbpPlace(c, place);
-  return `Matched "${place.title}" via ${provider}`;
+  if (known) {
+    applyGbpPlace(c, { title: known.title, address: "", phone: "", website: "", rating: null, reviews: null, placeId: known.placeId, cid: known.cid, type: "", hours: {}, source: pasted ? "GBP link" : "website" });
+    const from = pasted ? "the pasted link" : `the map/review link on their website (${"from" in known ? known.from : ""})`;
+    patch(c, "gbpLink", { note: `Read from ${from}${maps ? "" : " — no Maps search used"}. Confirm it's their current listing.`, source: "gbp", status: "review" });
+    patch(c, "address", { note: "Address not checked against GBP (no Maps search result) — compare with the GBP.", source: "gbp", status: "review" });
+    return `Found GBP on ${pasted ? "the pasted link" : "their website"} (free)${searchErr ? ` · Maps search failed: ${searchErr}` : ""}`;
+  }
+  if (!maps) {
+    patch(c, "gbpLink", { note: "No GBP link on their website and no Maps search key. Add a free key in Settings → Research (OpenWeb Ninja, SerpApi, Apify, HasData or Serper).", source: "gbp", status: "review" });
+    return "No GBP found — no Maps search key and none on their website";
+  }
+  patch(c, "gbpLink", { note: searchErr ? `Maps search failed (${searchErr}).` : `Couldn't confidently match a Google Business Profile${candidates.length ? ` (closest: ${candidates.slice(0, 3).map((p) => `${p.title} — ${p.address}`).join("; ")})` : ""}.`, source: "gbp", status: "review" });
+  return searchErr ? `Maps search failed: ${searchErr}` : "No confident GBP match";
 }
 
 /** Copies a matched GBP into the sheet (exported for tests). */
 export function applyGbpPlace(c: Collection, place: Place) {
   const name = c.fields.shopName.value, jiraAddr = c.fields.address.value;
   // Name — Jira is the fact; just note a mismatch
-  const sim = nameSimilarity(name, place.title);
+  const sim = place.title ? nameSimilarity(name, place.title) : 1;
   if (sim < 1) patch(c, "shopName", { note: `GBP name is "${place.title}" — kept the Jira name (fact).`, source: "jira", status: sim >= 0.5 ? "ok" : "review" });
   else patch(c, "shopName", { status: "ok", source: "jira" });
   c.fields.shopName.note = c.fields.shopName.note.replace("Verify it matches the Google Business Profile name.", "").trim();
@@ -153,31 +169,39 @@ export function applyGbpPlace(c: Collection, place: Place) {
 async function stepGbpLocations(c: Collection, ev: Evidence): Promise<string> {
   const name = c.fields.shopName.value;
   const { maps } = await searchAvailable();
+  const siteFound = await gbpFromWebsite(c, ev);
   ev.gbpLocs = ev.gbpLocs || [];
   const out: string[] = [];
   for (const [i, L] of c.locations.entries()) {
     const lf = L.fields;
-    let place: Place | null = null, candidates: Place[] = [], provider = "", query = "";
-    try {
-      if (maps) {
+    let place: Place | null = null, candidates: Place[] = [], provider = "", query = "", searchErr = "";
+    const site = pickSiteGbp(siteFound, name, { city: L.city, address: lf.address.value }, c.locations.length > 1);
+    const pasted = lf.gbpLink.value && !/maps\?cid=\d+$/.test(lf.gbpLink.value) ? await resolveGbpLink(lf.gbpLink.value).catch(() => null) : null;
+    const known = pasted || site;
+    if (maps) {
+      try {
         const zip = lf.address.value.match(/\d{5}/)?.[0], num = lf.address.value.match(/^\d+/)?.[0];
-        const score = (p: Place) => nameSimilarity(name, p.title) * 1.5 + (zip && p.address.includes(zip) ? 1.5 : 0) + (num && p.address.startsWith(num) ? 1 : 0) + (L.city && p.address.includes(L.city) ? 0.5 : 0);
+        const score = (p: Place) => nameSimilarity(name, p.title) * 1.5 + (zip && p.address.includes(zip) ? 1.5 : 0) + (num && p.address.startsWith(num) ? 1 : 0) + (L.city && p.address.includes(L.city) ? 0.5 : 0)
+          + (known && ((known.cid && p.cid === known.cid) || (known.placeId && p.placeId === known.placeId)) ? 3 : 0);
         query = `${name} ${lf.address.value || `${L.city}, ${L.state}`}`.trim();
         const cached = ev.gbpLocs[i];
-        const r = cached?.query === query ? { places: cached.candidates, provider: cached.provider } : await mapsSearch(query);
+        const r = cached?.query === query && cached.candidates.length ? { places: cached.candidates, provider: cached.provider } : await mapsSearch(query);
         provider = r.provider; candidates = r.places;
         const best = [...candidates].sort((a, b) => score(b) - score(a))[0];
         if (best && score(best) >= 1.5) place = best;
-      } else if (lf.gbpLink.value) { place = await resolveGbpLink(lf.gbpLink.value); provider = "GBP link"; }
-    } catch (e) { out.push(`Location ${i + 1}: ${(e as Error).message.slice(0, 120)}`); continue; }
+      } catch (e) { searchErr = (e as Error).message.slice(0, 120); }
+    }
     ev.gbpLocs[i] = { query, provider, place, candidates: candidates.slice(0, 5), at: now() };
-    if (!place) {
-      patchField(lf.gbpLink, { note: maps ? `No confident GBP match for ${L.city || `location ${i + 1}`} — paste its GBP link.` : "No Maps search key — paste this location's GBP link and run again.", source: "gbp", status: "review" });
-      out.push(`${L.city || `Location ${i + 1}`}: no match`);
+    const label = L.city || `Location ${i + 1}`;
+    if (place) { applyGbpToLocation(c, i, place); out.push(`${label}: "${place.title}"`); continue; }
+    if (known) {
+      applyGbpToLocation(c, i, { title: known.title, address: "", phone: "", website: "", rating: null, reviews: null, placeId: known.placeId, cid: known.cid, type: "", hours: {}, source: "website" });
+      patchField(lf.gbpLink, { note: `Read from ${pasted ? "the pasted link" : "the map/review link on their website"} — confirm it's this location's current listing.`, source: "gbp", status: "review" });
+      out.push(`${label}: found on ${pasted ? "pasted link" : "their website"} (free)`);
       continue;
     }
-    applyGbpToLocation(c, i, place);
-    out.push(`${L.city || `Location ${i + 1}`}: "${place.title}"`);
+    patchField(lf.gbpLink, { note: !maps ? "No GBP link for this location on their website and no Maps search key (Settings → Research)." : searchErr ? `Maps search failed (${searchErr}).` : `No confident GBP match for ${label}.`, source: "gbp", status: "review" });
+    out.push(`${label}: ${searchErr ? "search failed" : "no match"}`);
   }
   return `${out.join(" · ")}${out.length ? "" : "No locations"}`;
 }
@@ -228,6 +252,106 @@ async function resolveGbpLink(link: string): Promise<Place | null> {
   const title = dec.match(/\/maps\/place\/([^/@]+)/)?.[1]?.replace(/\+/g, " ") || "";
   if (!cid && !placeId) return null;
   return { title, address: "", phone: "", website: "", rating: null, reviews: null, placeId, cid, type: "", hours: {}, source: "GBP link" };
+}
+
+// ---------- GBP from the shop's own website (free) ----------
+
+export type SiteGbp = { cid: string; placeId: string; title: string; context: string; from: string };
+
+const hexCid = (h: string) => { try { return BigInt("0x" + h).toString(); } catch { return ""; } };
+const safeDecode = (x: string) => { try { return decodeURIComponent(x); } catch { return x; } };
+
+/** Finds Google Maps embeds, CID links, review links (Place ID) and short Maps links in a page. */
+export function harvestGbp(html: string, pageUrl: string): { found: SiteGbp[]; shortLinks: string[] } {
+  const $ = cheerio.load(html);
+  const found: SiteGbp[] = [];
+  const shortLinks = new Set<string>();
+  const seen = new Set<string>();
+  const add = (g: SiteGbp) => {
+    const k = `${g.cid}|${g.placeId}`;
+    if ((!g.cid && !g.placeId) || seen.has(k)) return;
+    seen.add(k); found.push(g);
+  };
+  const scan = (raw: string, context: string) => {
+    const u = safeDecode(safeDecode(raw)).replace(/&amp;/g, "&");
+    if (!/google\.[a-z.]+\/maps|maps\.google\.|goo\.gl|g\.page|search\.google\.com\/local|business\.google\.com/i.test(u)) return;
+    if (/maps\.app\.goo\.gl\/|goo\.gl\/maps\/|g\.page\//i.test(u)) { const m = u.match(/https?:\/\/(?:maps\.app\.goo\.gl|goo\.gl\/maps|g\.page)\/[^\s"'<>]+/i); if (m) shortLinks.add(m[0]); return; }
+    const feat = u.match(/0x[0-9a-f]{4,}:0x([0-9a-f]{4,})/i)?.[1];
+    const cid = u.match(/[?&]cid=(\d{6,})/)?.[1] || (feat ? hexCid(feat) : "");
+    const placeId = u.match(/(?:placeid=|place_id[:=]|query_place_id=|!1s)(ChIJ[0-9A-Za-z_-]{20,})/i)?.[1] || u.match(/(ChIJ[0-9A-Za-z_-]{20,})/)?.[1] || "";
+    const once = safeDecode(raw.replace(/&amp;/g, "&"));
+    const rawName = raw.match(/!2s([^!&"']+)/)?.[1] || once.match(/!2s([^!&"']+)/)?.[1] || once.match(/\/maps\/place\/([^/@?]+)/)?.[1] || "";
+    const title = safeDecode(safeDecode(rawName)).replace(/\+/g, " ").trim();
+    add({ cid, placeId, title, context: context.replace(/\s+/g, " ").trim().slice(0, 200), from: pageUrl });
+  };
+  $("iframe[src], iframe[data-src], a[href], [data-src], [data-href], [data-url]").each((_, el) => {
+    const $el = $(el);
+    // nearby text: the closest small block around the link/map (not the whole page), so MSO locations can be told apart
+    let near = "";
+    for (const b of [$el.parent(), $el.closest("li,address,p,div,section,footer")]) { const t = b.text().replace(/\s+/g, " ").trim(); if (t && t.length <= 400) { near = t; break; } }
+    const ctx = [$el.attr("title"), $el.attr("aria-label"), $el.text(), near].filter(Boolean).join(" ").slice(0, 300);
+    for (const attr of ["src", "data-src", "href", "data-href", "data-url"]) { const v = $el.attr(attr); if (v) scan(v, ctx); }
+  });
+  // Maps URLs that only appear inside scripts / JSON (some site builders put the embed there)
+  for (const m of html.matchAll(/https?:(?:\\?\/){2}(?:www\.)?google\.[a-z.]+(?:\\?\/)maps[^"'<>\s]{10,600}/gi)) scan(m[0].replace(/\\\//g, "/"), "");
+  return { found, shortLinks: [...shortLinks].slice(0, 6) };
+}
+
+/** Reads the shop's website (home + contact/location pages) for its own GBP links. Cached per project. */
+async function gbpFromWebsite(c: Collection, ev: Evidence): Promise<SiteGbp[]> {
+  const start = c.fields.existingWebsite.value;
+  if (!start) return [];
+  if (ev.gbpSite?.url === start) return ev.gbpSite.found;
+  const found: SiteGbp[] = [];
+  const short = new Set<string>();
+  const get = async (u: string) => {
+    const r = await safeFetch(u, { hosts: "public", headers: { "User-Agent": UA, Accept: "text/html" }, timeoutMs: 12000, maxBytes: 3_000_000 });
+    return r.status < 400 ? { url: r.url, html: r.text() } : null;
+  };
+  try {
+    const home = await get(/^https?:\/\//i.test(start.trim()) ? start.trim() : websiteUrl(start));
+    if (home) {
+      const h = harvestGbp(home.html, home.url);
+      found.push(...h.found); h.shortLinks.forEach((x) => short.add(x));
+      const $ = cheerio.load(home.html);
+      const host = new URL(home.url).hostname.replace(/^www\./, "");
+      const subs = new Set<string>();
+      $("a[href]").each((_, a) => {
+        try {
+          const abs = new URL($(a).attr("href") || "", home.url); abs.hash = "";
+          if (abs.hostname.replace(/^www\./, "") === host && /contact|location|direction|find-us|visit|review|hours|about/i.test(abs.pathname + " " + $(a).text())) subs.add(abs.toString());
+        } catch { /* skip */ }
+      });
+      const pages = await Promise.allSettled([...subs].filter((u) => u.replace(/\/$/, "") !== home.url.replace(/\/$/, "")).slice(0, 4).map(get));
+      for (const p of pages) if (p.status === "fulfilled" && p.value) { const h2 = harvestGbp(p.value.html, p.value.url); found.push(...h2.found); h2.shortLinks.forEach((x) => short.add(x)); }
+    }
+  } catch { /* website offline — fine, Maps search may still work */ }
+  for (const link of [...short].slice(0, 4)) {
+    const p = await resolveGbpLink(link).catch(() => null);
+    if (p) found.push({ cid: p.cid, placeId: p.placeId, title: p.title, context: "", from: link });
+  }
+  // de-duplicate
+  const out: SiteGbp[] = [];
+  for (const g of found) if (!out.some((o) => (g.cid && o.cid === g.cid && (!g.placeId || o.placeId === g.placeId)) || (g.placeId && o.placeId === g.placeId && !g.cid))) out.push(g);
+  ev.gbpSite = { url: start, found: out.slice(0, 12), at: now() };
+  return ev.gbpSite.found;
+}
+
+/** Picks the website GBP that belongs to this shop (or this MSO location). */
+function pickSiteGbp(found: SiteGbp[], shopName: string, loc?: { city: string; address: string }, many = false): { cid: string; placeId: string; title: string; from: string } | null {
+  let list = found.filter((g) => !g.title || nameSimilarity(shopName, g.title) >= 0.4 || norm(g.title).includes(norm(shopName).split(" ")[0] || "~"));
+  if (loc) {
+    const city = loc.city.toLowerCase().replace(/[^a-z]/g, ""), num = loc.address.match(/^\d+/)?.[0] || "~", zip = loc.address.match(/\d{5}/)?.[0] || "~";
+    const hit = list.filter((g) => { const t = `${g.title} ${g.context}`.toLowerCase(); return (city.length > 2 && t.replace(/[^a-z]/g, "").includes(city)) || t.includes(num) || t.includes(zip); });
+    if (hit.length) list = hit; else if (many) return null; // can't tell which location it is
+  }
+  const cids = [...new Set(list.map((g) => g.cid).filter(Boolean))], pids = [...new Set(list.map((g) => g.placeId).filter(Boolean))];
+  const both = list.find((g) => g.cid && g.placeId);
+  if (both) return both;
+  if (cids.length > 1 || pids.length > 1) { const first = list[0]; return first ? { ...first } : null; }
+  if (!cids.length && !pids.length) return null;
+  const src = list.find((g) => g.cid) || list[0];
+  return { cid: cids[0] || "", placeId: pids[0] || "", title: src.title || list.find((g) => g.title)?.title || "", from: src.from };
 }
 
 // ---------- 2. Existing website ----------
@@ -318,7 +442,7 @@ export async function stepWebsite(c: Collection, ev: Evidence): Promise<string> 
   return `Read ${pages.length} page(s) from ${domainOf(home.url)}`;
 }
 
-function addSocials(c: Collection, urls: string[], source: Source, why: string, ratingByUrl: Record<string, number | undefined> = {}, target?: CField) {
+function addSocials(c: Collection, urls: string[], source: Source, why: string, ratingByUrl: Record<string, number | undefined> = {}, target?: CField, review = false) {
   const tf = target || c.fields.socials;
   const cur = splitLinesKeep(tf.value);
   const curNorm = new Set(cur.map((u) => u.toLowerCase().replace(/^https?:\/\/(www\.)?/, "").replace(/\/$/, "")));
@@ -339,7 +463,7 @@ function addSocials(c: Collection, urls: string[], source: Source, why: string, 
     tf.value = [...cur, ...added].join("\n\n");
     if (!tf.manual) tf.source = tf.source || source;
     tf.note = tf.note.replace(/Research will look for this location's Facebook\/Yelp\/etc\.\s*/, "").trim();
-    patchField(tf, { note: `${why}: ${added.map(platformOf).join(", ")}.`, source });
+    patchField(tf, { note: `${why}: ${added.map(platformOf).join(", ")}.`, source, status: review ? "review" : undefined });
   }
 }
 
@@ -349,15 +473,15 @@ function locationIndexFor(c: Collection, text: string) {
   const hits = c.locations.map((L, i) => ({ i, tok: L.city.toLowerCase().replace(/[^a-z]/g, "") })).filter((x) => x.tok.length > 2 && t.includes(x.tok));
   return hits.length === 1 ? hits[0].i : -1;
 }
-function addSocialsSmart(c: Collection, urls: string[], source: Source, why: string, ratingByUrl: Record<string, number | undefined> = {}, context: Record<string, string> = {}) {
-  if (!c.locations.length) return addSocials(c, urls, source, why, ratingByUrl);
+function addSocialsSmart(c: Collection, urls: string[], source: Source, why: string, ratingByUrl: Record<string, number | undefined> = {}, context: Record<string, string> = {}, review = false) {
+  if (!c.locations.length) return addSocials(c, urls, source, why, ratingByUrl, undefined, review);
   const buckets = new Map<number, string[]>();
   for (const u of urls) {
     const i = locationIndexFor(c, `${u} ${context[u] || ""}`);
     const idx = i >= 0 ? i : 0;
     buckets.set(idx, [...(buckets.get(idx) || []), u]);
   }
-  for (const [i, list] of buckets) addSocials(c, list, source, why, ratingByUrl, c.locations[i].fields.socials);
+  for (const [i, list] of buckets) addSocials(c, list, source, why, ratingByUrl, c.locations[i].fields.socials, review);
 }
 
 // ---------- 3. Web & social search ----------
@@ -382,11 +506,13 @@ export async function stepSearch(c: Collection, ev: Evidence): Promise<string> {
   let results: WebResult[] = [], provider = "";
   if (cachedQs === queries.join("|") && ev.search) { results = ev.search.results; provider = ev.search.provider + " (cached)"; }
   else {
+    const used = new Set<string>();
     for (const q of queries) {
       const r = await webSearch(q, 10);
-      provider = r.provider;
+      used.add(r.provider);
       for (const x of r.results) if (!results.some((y) => y.url === x.url)) results.push(x);
     }
+    provider = [...used].join(" + ");
     ev.search = { queries, provider, results: results.slice(0, 40), at: now() };
   }
 
@@ -397,7 +523,9 @@ export async function stepSearch(c: Collection, ev: Evidence): Promise<string> {
   };
   const socials = results.filter((r) => platformOf(r.url) && relevant(r) && !GENERIC_SOCIAL.test(new URL(r.url).pathname));
   const ratingByUrl = Object.fromEntries(socials.map((r) => [r.url, r.rating]));
-  addSocialsSmart(c, socials.map((r) => r.url), "search", "Found by web search", ratingByUrl, Object.fromEntries(socials.map((r) => [r.url, `${r.title} ${r.snippet}`])));
+  const ctx = Object.fromEntries(socials.map((r) => [r.url, `${r.title} ${r.snippet}`]));
+  addSocialsSmart(c, socials.filter((r) => !r.ai).map((r) => r.url), "search", "Found by web search", ratingByUrl, ctx);
+  addSocialsSmart(c, socials.filter((r) => r.ai).map((r) => r.url), "search", "Found by Groq AI search — open each link to double-check", ratingByUrl, ctx, true);
 
   // Certification / directory evidence
   const certHits: string[] = [];

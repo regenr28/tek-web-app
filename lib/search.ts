@@ -4,31 +4,36 @@ import { safeFetch } from "./net";
 import { groqBrowserSearch, parseJson } from "./ai";
 
 /**
- * Web + Google Maps search for Data Collection research. Free tiers, no credit card:
- *  - SerpApi: 250 searches / month (Google, Google Maps with place_id + CID)
- *  - Serper:  2,500 searches one-time (Google, Maps with placeId + cid)
- *  - Tavily:  1,000 credits / month (web search only)
- *  - Groq browser search (last resort, uses the Groq AI key)
- * Providers are tried in order; one that's out of credits is skipped and the next is used.
+ * Web + Google Maps search for Data Collection research. Every provider here has a free plan with no credit card:
+ *  Maps (Place ID + CID): OpenWeb Ninja 500/mo · SerpApi 250/mo · Apify ~1,250 places/mo · HasData ~100/mo · Serper 2,500 one-time
+ *  Web only: Tavily 1,000/mo · Linkup (free monthly credit) · Exa (free monthly credit)
+ *  Plus Groq's AI browser search (uses the Groq AI key) — tried FIRST for web/social searches so the
+ *  Maps credits are saved for finding the Google Business Profile.
+ * Providers are tried in order; one that's out of credits rests and the next is used.
  */
 
-export type SearchProviderId = "serpapi" | "serper" | "tavily";
-export const SEARCH_IDS: SearchProviderId[] = ["serpapi", "serper", "tavily"];
-export const SEARCH_INFO: Record<SearchProviderId, { label: string; env: string; signup: string; note: string; maps: boolean }> = {
-  serpapi: { label: "SerpApi", env: "SERPAPI_API_KEY", signup: "https://serpapi.com/users/sign_up", note: "250 free searches every month. Finds the Google Business Profile (Place ID + CID).", maps: true },
-  serper: { label: "Serper", env: "SERPER_API_KEY", signup: "https://serper.dev/signup", note: "2,500 free searches (one-time). Also finds Place ID + CID.", maps: true },
-  tavily: { label: "Tavily", env: "TAVILY_API_KEY", signup: "https://app.tavily.com", note: "1,000 free credits every month. Web search only (no Maps).", maps: false },
+export type SearchProviderId = "openwebninja" | "serpapi" | "apify" | "hasdata" | "serper" | "tavily" | "linkup" | "exa";
+export const SEARCH_IDS: SearchProviderId[] = ["openwebninja", "serpapi", "apify", "hasdata", "serper", "tavily", "linkup", "exa"];
+export const SEARCH_INFO: Record<SearchProviderId, { label: string; env: string; signup: string; note: string; maps: boolean; web: boolean }> = {
+  openwebninja: { label: "OpenWeb Ninja", env: "OPENWEBNINJA_API_KEY", signup: "https://www.openwebninja.com", note: "500 businesses free every month (Local Business Data API). Finds the GBP with Place ID + CID.", maps: true, web: false },
+  serpapi: { label: "SerpApi", env: "SERPAPI_API_KEY", signup: "https://serpapi.com/users/sign_up", note: "250 free searches every month. Finds the GBP (Place ID + CID) and does Google web search.", maps: true, web: true },
+  apify: { label: "Apify", env: "APIFY_API_TOKEN", signup: "https://console.apify.com/sign-up", note: "$5 free usage every month ≈ 1,250 GBP lookups (Google Maps Scraper). Slower: 20–60 s per lookup.", maps: true, web: false },
+  hasdata: { label: "HasData", env: "HASDATA_API_KEY", signup: "https://app.hasdata.com/sign-up", note: "1,000 free credits every month ≈ 100 Maps searches. Gives the Place ID (no CID).", maps: true, web: false },
+  serper: { label: "Serper", env: "SERPER_API_KEY", signup: "https://serper.dev/signup", note: "2,500 free searches (one-time). Finds Place ID + CID and does Google web search.", maps: true, web: true },
+  tavily: { label: "Tavily", env: "TAVILY_API_KEY", signup: "https://app.tavily.com", note: "1,000 free credits every month. Web search only.", maps: false, web: true },
+  linkup: { label: "Linkup", env: "LINKUP_API_KEY", signup: "https://app.linkup.so", note: "Free monthly credit. Web search only.", maps: false, web: true },
+  exa: { label: "Exa", env: "EXA_API_KEY", signup: "https://dashboard.exa.ai", note: "Free monthly credit. Web search only.", maps: false, web: true },
 };
 
 type Cfg = { enabled: boolean; keyEnc?: string };
-type Settings = { order: SearchProviderId[]; providers: Record<SearchProviderId, Cfg> };
+type Settings = { order: SearchProviderId[]; providers: Record<SearchProviderId, Cfg>; aiFirst: boolean };
 
 async function getSettings(): Promise<Settings> {
   const row = await one<{ value: string }>("SELECT value FROM settings WHERE key = 'search'");
   const saved = row ? (JSON.parse(row.value) as Partial<Settings>) : {};
   const providers = Object.fromEntries(SEARCH_IDS.map((id) => [id, { enabled: true, ...(saved.providers?.[id] || {}) }])) as Settings["providers"];
   const order = [...(saved.order || []).filter((x) => SEARCH_IDS.includes(x)), ...SEARCH_IDS.filter((x) => !(saved.order || []).includes(x))];
-  return { order, providers };
+  return { order, providers, aiFirst: saved.aiFirst ?? true };
 }
 const keyOf = (id: SearchProviderId, c: Cfg) => (c.keyEnc ? decrypt(c.keyEnc) : "") || process.env[SEARCH_INFO[id].env] || "";
 
@@ -37,7 +42,7 @@ export async function publicSearchSettings() {
   const month = new Date().toISOString().slice(0, 7);
   const usage = Object.fromEntries(await Promise.all(SEARCH_IDS.map(async (id) => [id, (await one<{ count: number }>("SELECT count FROM rate_limits WHERE key = ?", [`usage:${id}:${month}`]))?.count || 0])));
   return {
-    order: s.order,
+    order: s.order, aiFirst: s.aiFirst,
     providers: Object.fromEntries(s.order.map((id) => {
       const k = keyOf(id, s.providers[id]);
       return [id, { enabled: s.providers[id].enabled, hasKey: !!k, keyHint: mask(k), keySource: s.providers[id].keyEnc ? "settings" : k ? "env" : "none", usedThisMonth: usage[id], ...SEARCH_INFO[id] }];
@@ -45,8 +50,9 @@ export async function publicSearchSettings() {
   };
 }
 
-export async function saveSearchSettings(input: { order?: SearchProviderId[]; providers?: Partial<Record<SearchProviderId, { enabled?: boolean; apiKey?: string; clearKey?: boolean }>> }) {
+export async function saveSearchSettings(input: { order?: SearchProviderId[]; aiFirst?: boolean; providers?: Partial<Record<SearchProviderId, { enabled?: boolean; apiKey?: string; clearKey?: boolean }>> }) {
   const s = await getSettings();
+  if (typeof input.aiFirst === "boolean") s.aiFirst = input.aiFirst;
   if (input.order) s.order = [...input.order, ...SEARCH_IDS.filter((x) => !input.order!.includes(x))];
   for (const [id, p] of Object.entries(input.providers || {}) as [SearchProviderId, { enabled?: boolean; apiKey?: string; clearKey?: boolean }][]) {
     const c = s.providers[id];
@@ -65,25 +71,30 @@ async function countUse(id: string) {
 
 const cooling = new Map<string, number>();
 
-async function getJ(url: string, headers: Record<string, string> = {}, body?: unknown) {
+async function getJ(url: string, headers: Record<string, string> = {}, body?: unknown, timeoutMs = 25000) {
   const r = await safeFetch(url, {
-    hosts: ["serpapi.com", "google.serper.dev", "api.tavily.com"], method: body ? "POST" : "GET",
+    hosts: ["serpapi.com", "google.serper.dev", "api.tavily.com", "api.openwebninja.com", "api.apify.com", "api.hasdata.com", "api.linkup.so", "api.exa.ai"], method: body ? "POST" : "GET",
     headers: { Accept: "application/json", ...(body ? { "Content-Type": "application/json" } : {}), ...headers },
-    body: body ? JSON.stringify(body) : undefined, timeoutMs: 25000, maxBytes: 5 * 1024 * 1024,
+    body: body ? JSON.stringify(body) : undefined, timeoutMs, maxBytes: 5 * 1024 * 1024,
   });
-  const j = JSON.parse(r.text() || "{}");
+  const raw = r.text() || "{}";
+  let j;
+  try { j = JSON.parse(raw); } catch { throw Object.assign(new Error(`HTTP ${r.status}: ${raw.replace(/\s+/g, " ").slice(0, 140)}`), { status: r.status }); }
   if (r.status >= 400 || j?.error) throw Object.assign(new Error(String(j?.error || j?.message || `HTTP ${r.status}`).slice(0, 160)), { status: r.status });
   return j;
 }
 
-async function providers(needMaps: boolean) {
+async function providers(kind: "maps" | "web", only?: SearchProviderId) {
   const s = await getSettings();
-  return s.order.filter((id) => s.providers[id].enabled && keyOf(id, s.providers[id]) && (!needMaps || SEARCH_INFO[id].maps) && !((cooling.get(id) || 0) > Date.now()))
-    .map((id) => ({ id, key: keyOf(id, s.providers[id]) }));
+  if (only) { const k = keyOf(only, s.providers[only]); return k && SEARCH_INFO[only][kind] ? [{ id: only, key: k }] : []; }
+  const ok = s.order.filter((id) => s.providers[id].enabled && keyOf(id, s.providers[id]) && SEARCH_INFO[id][kind] && !((cooling.get(id) || 0) > Date.now()));
+  // Web searches use web-only providers first, so the Maps-capable credits are kept for GBP lookups
+  const list = kind === "web" ? [...ok.filter((id) => !SEARCH_INFO[id].maps), ...ok.filter((id) => SEARCH_INFO[id].maps)] : ok;
+  return list.map((id) => ({ id, key: keyOf(id, s.providers[id]) }));
 }
 
 export async function searchAvailable() {
-  return { web: (await providers(false)).length > 0, maps: (await providers(true)).length > 0 };
+  return { web: (await providers("web")).length > 0, maps: (await providers("maps")).length > 0 };
 }
 
 // ---------- Google Maps (GBP) ----------
@@ -97,18 +108,34 @@ const cidFromDataId = (dataId: string) => { const h = dataId.match(/:0x([0-9a-f]
 
 function hoursMap(h: unknown): Record<string, string> {
   if (!h || typeof h !== "object") return {};
-  if (Array.isArray(h)) { // serpapi sometimes: [{ monday: "..." }]
-    return Object.assign({}, ...h.map((x) => (typeof x === "object" ? x : {})));
+  if (Array.isArray(h)) {
+    // [{ day: "Monday", hours: "8 AM to 5 PM" }] (Apify) · [{ day, time }] (HasData) · [{ monday: "..." }] (SerpApi)
+    return Object.assign({}, ...h.map((x) => {
+      if (!x || typeof x !== "object") return {};
+      const o = x as Record<string, unknown>;
+      if (typeof o.day === "string") return { [o.day.toLowerCase()]: String(o.hours ?? o.time ?? "") };
+      return Object.fromEntries(Object.entries(o).map(([k, v]) => [k.toLowerCase(), Array.isArray(v) ? v.join(", ") : String(v)]));
+    }));
   }
   return Object.fromEntries(Object.entries(h as Record<string, unknown>).map(([k, v]) => [k.toLowerCase(), Array.isArray(v) ? v.join(", ") : String(v)]));
 }
 
-export async function mapsSearch(query: string): Promise<{ places: Place[]; provider: string }> {
+const num = (v: unknown) => (typeof v === "number" ? v : typeof v === "string" && v.trim() && !isNaN(Number(v)) ? Number(v) : null);
+
+export async function mapsSearch(query: string, only?: SearchProviderId): Promise<{ places: Place[]; provider: string }> {
   const errors: string[] = [];
-  for (const p of await providers(true)) {
+  for (const p of await providers("maps", only)) {
     try {
       let places: Place[] = [];
-      if (p.id === "serpapi") {
+      if (p.id === "openwebninja") {
+        const j = await getJ(`https://api.openwebninja.com/local-business-data/search?query=${encodeURIComponent(query)}&limit=5&region=us&language=en`, { "x-api-key": p.key });
+        places = (Array.isArray(j.data) ? j.data : []).slice(0, 5).map((x: Record<string, unknown>) => ({
+          title: String(x.name || ""), address: String(x.full_address || x.address || ""), phone: String(x.phone_number || ""), website: String(x.website || ""),
+          rating: num(x.rating), reviews: num(x.review_count), placeId: String(x.place_id || ""),
+          cid: String(x.cid || "") || cidFromDataId(String(x.google_id || "")), type: String(x.type || (Array.isArray(x.subtypes) ? x.subtypes.join(", ") : "")),
+          hours: hoursMap(x.working_hours), source: "OpenWeb Ninja",
+        }));
+      } else if (p.id === "serpapi") {
         const j = await getJ(`https://serpapi.com/search.json?engine=google_maps&type=search&hl=en&gl=us&q=${encodeURIComponent(query)}&api_key=${encodeURIComponent(p.key)}`);
         const list = j.place_results ? [j.place_results] : j.local_results || [];
         places = list.slice(0, 5).map((x: Record<string, unknown>) => ({
@@ -116,6 +143,27 @@ export async function mapsSearch(query: string): Promise<{ places: Place[]; prov
           rating: typeof x.rating === "number" ? x.rating : null, reviews: typeof x.reviews === "number" ? x.reviews : null,
           placeId: String(x.place_id || ""), cid: String(x.data_cid || "") || cidFromDataId(String(x.data_id || "")),
           type: String(x.type || (Array.isArray(x.types) ? x.types.join(", ") : "")), hours: hoursMap(x.operating_hours || (x.hours as unknown)), source: "SerpApi",
+        }));
+      } else if (p.id === "apify") {
+        // Google Maps Scraper actor, run synchronously (one search, no reviews/images, to keep it quick and cheap)
+        const j = await getJ("https://api.apify.com/v2/acts/compass~crawler-google-places/run-sync-get-dataset-items?timeout=150&format=json",
+          { Authorization: `Bearer ${p.key}` },
+          { searchStringsArray: [query], maxCrawledPlacesPerSearch: 3, language: "en", countryCode: "us", maxReviews: 0, maxImages: 0, scrapePlaceDetailPage: false, skipClosedPlaces: false },
+          170_000);
+        places = (Array.isArray(j) ? j : []).slice(0, 5).map((x: Record<string, unknown>) => ({
+          title: String(x.title || ""), address: String(x.address || ""), phone: String(x.phone || x.phoneUnformatted || ""), website: String(x.website || ""),
+          rating: num(x.totalScore), reviews: num(x.reviewsCount), placeId: String(x.placeId || ""),
+          cid: String(x.cid || "") || cidFromDataId(String(x.fid || "")), type: String(x.categoryName || (Array.isArray(x.categories) ? x.categories.join(", ") : "")),
+          hours: hoursMap(x.openingHours), source: "Apify",
+        }));
+      } else if (p.id === "hasdata") {
+        const j = await getJ(`https://api.hasdata.com/scrape/google-maps/search?q=${encodeURIComponent(query)}&gl=us&hl=en`, { "x-api-key": p.key }, undefined, 40000);
+        const list = j.placeResults ? [j.placeResults] : j.localResults || [];
+        places = list.slice(0, 5).map((x: Record<string, any>) => ({
+          title: String(x.title || ""), address: String(x.address || ""), phone: String(x.phone || ""), website: String(x.website || ""),
+          rating: num(x.rating), reviews: num(x.reviews), placeId: String(x.placeId || ""),
+          cid: String(x.cid || "") || cidFromDataId(String(x.dataId || x.data_id || "")), type: String(x.type || ""),
+          hours: hoursMap(x.workingHours?.days || x.workingHours), source: "HasData",
         }));
       } else if (p.id === "serper") {
         const j = await getJ("https://google.serper.dev/maps", { "X-API-KEY": p.key }, { q: query, gl: "us", hl: "en" });
@@ -130,22 +178,52 @@ export async function mapsSearch(query: string): Promise<{ places: Place[]; prov
       return { places, provider: SEARCH_INFO[p.id].label };
     } catch (e) {
       errors.push(`${SEARCH_INFO[p.id].label}: ${(e as Error).message}`);
-      cooling.set(p.id, Date.now() + ((e as { status?: number }).status === 429 || /limit|credit|quota|run out/i.test((e as Error).message) ? 3_600_000 : 30_000));
+      if (!only) cooling.set(p.id, Date.now() + restMs(e));
     }
   }
-  throw new Error(errors.length ? errors.join(" · ") : "No Maps search key — add a free SerpApi or Serper key in Settings → Research.");
+  throw new Error(errors.length ? errors.join(" · ") : only ? "Add this provider's API key first." : "No Maps search key — add a free key (OpenWeb Ninja, SerpApi, Apify, HasData or Serper) in Settings → Research.");
 }
+
+const restMs = (e: unknown) => ((e as { status?: number }).status === 429 || (e as { status?: number }).status === 402 || /limit|credit|quota|run out|exceed|insufficient|usage/i.test((e as Error).message) ? 3_600_000 : 30_000);
 
 // ---------- Web search ----------
 
-export type WebResult = { title: string; url: string; snippet: string; rating?: number; reviews?: number };
+export type WebResult = { title: string; url: string; snippet: string; rating?: number; reviews?: number; ai?: boolean };
 
-export async function webSearch(query: string, num = 10): Promise<{ results: WebResult[]; provider: string }> {
+async function groqSearch(query: string, num: number): Promise<WebResult[]> {
+  const text = await groqBrowserSearch(`Search the web for: ${query}\nReturn ONLY JSON: {"results":[{"title":"","url":"","snippet":""}]} with up to ${num} real result URLs you actually opened or saw in search results. Never guess or build URLs.`);
+  const j = parseJson<{ results?: WebResult[] }>(text);
+  return (j?.results || []).filter((r) => typeof r?.url === "string" && /^https?:\/\/[^\s"'<>]+$/.test(r.url)).map((r) => ({ title: String(r.title || ""), url: r.url, snippet: String(r.snippet || "").slice(0, 400), ai: true }));
+}
+
+export async function webSearch(query: string, num = 10, only?: SearchProviderId): Promise<{ results: WebResult[]; provider: string }> {
   const errors: string[] = [];
-  for (const p of await providers(false)) {
+  const s = await getSettings();
+  // 1) Groq AI browser search first (free, daily limits) — results are marked so they get a "double-check" note
+  if (!only && s.aiFirst && !((cooling.get("groq") || 0) > Date.now())) {
+    try {
+      const results = await groqSearch(query, num);
+      if (results.length) return { results, provider: "Groq AI search" };
+      errors.push("Groq AI search: no results");
+    } catch (e) {
+      errors.push(`Groq AI search: ${(e as Error).message.slice(0, 120)}`);
+      if (!/No Groq key/.test((e as Error).message)) cooling.set("groq", Date.now() + restMs(e));
+    }
+  }
+  // 2) Search APIs — web-only ones first
+  for (const p of await providers("web", only)) {
     try {
       let results: WebResult[] = [];
-      if (p.id === "serpapi") {
+      if (p.id === "tavily") {
+        const j = await getJ("https://api.tavily.com/search", { Authorization: `Bearer ${p.key}` }, { query, max_results: Math.min(num, 10), search_depth: "basic" });
+        results = (j.results || []).map((x: Record<string, any>) => ({ title: x.title || "", url: x.url || "", snippet: String(x.content || "").slice(0, 400) }));
+      } else if (p.id === "linkup") {
+        const j = await getJ("https://api.linkup.so/v1/search", { Authorization: `Bearer ${p.key}` }, { q: query, depth: "standard", outputType: "searchResults" });
+        results = (j.results || []).slice(0, num).map((x: Record<string, any>) => ({ title: x.name || x.title || "", url: x.url || "", snippet: String(x.content || "").slice(0, 400) }));
+      } else if (p.id === "exa") {
+        const j = await getJ("https://api.exa.ai/search", { "x-api-key": p.key }, { query, numResults: Math.min(num, 10), type: "auto", contents: { text: { maxCharacters: 400 } } });
+        results = (j.results || []).map((x: Record<string, any>) => ({ title: x.title || "", url: x.url || "", snippet: String(x.text || "").slice(0, 400) }));
+      } else if (p.id === "serpapi") {
         const j = await getJ(`https://serpapi.com/search.json?engine=google&hl=en&gl=us&num=${num}&q=${encodeURIComponent(query)}&api_key=${encodeURIComponent(p.key)}`);
         results = (j.organic_results || []).map((x: Record<string, any>) => ({
           title: x.title || "", url: x.link || "", snippet: x.snippet || "",
@@ -154,23 +232,33 @@ export async function webSearch(query: string, num = 10): Promise<{ results: Web
       } else if (p.id === "serper") {
         const j = await getJ("https://google.serper.dev/search", { "X-API-KEY": p.key }, { q: query, gl: "us", hl: "en", num });
         results = (j.organic || []).map((x: Record<string, any>) => ({ title: x.title || "", url: x.link || "", snippet: x.snippet || "", rating: x.rating, reviews: x.ratingCount }));
-      } else if (p.id === "tavily") {
-        const j = await getJ("https://api.tavily.com/search", { Authorization: `Bearer ${p.key}` }, { query, max_results: Math.min(num, 10), search_depth: "basic" });
-        results = (j.results || []).map((x: Record<string, any>) => ({ title: x.title || "", url: x.url || "", snippet: String(x.content || "").slice(0, 400) }));
       }
       await countUse(p.id);
-      return { results, provider: SEARCH_INFO[p.id].label };
+      return { results: results.filter((r) => /^https?:\/\//.test(r.url)), provider: SEARCH_INFO[p.id].label };
     } catch (e) {
       errors.push(`${SEARCH_INFO[p.id].label}: ${(e as Error).message}`);
-      cooling.set(p.id, Date.now() + ((e as { status?: number }).status === 429 || /limit|credit|quota|run out/i.test((e as Error).message) ? 3_600_000 : 30_000));
+      if (!only) cooling.set(p.id, Date.now() + restMs(e));
     }
   }
-  // Last resort: ask Groq to browse and return links
-  try {
-    const text = await groqBrowserSearch(`Search the web for: ${query}\nReturn ONLY JSON: {"results":[{"title":"","url":"","snippet":""}]} with up to ${num} real result URLs you found.`);
-    const j = parseJson<{ results?: WebResult[] }>(text);
-    if (j?.results?.length) return { results: j.results.filter((r) => /^https?:\/\//.test(r.url)), provider: "Groq browser search" };
-    errors.push("Groq browser search: no results");
-  } catch (e) { errors.push(`Groq browser search: ${(e as Error).message.slice(0, 120)}`); }
-  throw new Error(errors.join(" · ") || "No web search available — add a free SerpApi, Serper or Tavily key in Settings → Research.");
+  if (only) throw new Error(errors.join(" · ") || "Add this provider's API key first.");
+  // 3) Groq as a last resort when "AI first" is off
+  if (!s.aiFirst) {
+    try {
+      const results = await groqSearch(query, num);
+      if (results.length) return { results, provider: "Groq AI search" };
+    } catch (e) { errors.push(`Groq AI search: ${(e as Error).message.slice(0, 120)}`); }
+  }
+  throw new Error(errors.join(" · ") || "No web search available — add a Groq AI key, or a free Tavily/Linkup/Exa/SerpApi/Serper key in Settings → Research.");
+}
+
+/** Settings → Research "Test": one real search with just this provider (uses 1 credit). */
+export async function testSearchProvider(id: SearchProviderId): Promise<string> {
+  if (SEARCH_INFO[id].maps) {
+    const r = await mapsSearch("Googleplex 1600 Amphitheatre Pkwy Mountain View CA", id);
+    const p = r.places[0];
+    if (!p) return `${r.provider} answered but returned no places.`;
+    return `Works — found "${p.title}"${p.placeId ? ` · Place ID ✓` : " · no Place ID"}${p.cid ? ` · CID ✓` : " · no CID"}`;
+  }
+  const r = await webSearch("Tekmetric auto repair shop software", 5, id);
+  return `Works — ${r.results.length} result(s), e.g. ${r.results[0]?.url || "none"}`;
 }

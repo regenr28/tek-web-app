@@ -6,7 +6,7 @@ import { loadProject, saveProject, jiraRaw } from "@/lib/projects";
 import { stepGbp, stepWebsite, stepSearch, stepAi, stepReview } from "@/lib/research";
 import { toSheetTsv, toPlainText, sheetRows } from "@/lib/collect";
 
-export const maxDuration = 60;
+export const maxDuration = 300; // Apify GBP lookups can take up to ~2.5 minutes
 
 /** Runs one research step. Failures are recorded on the project, never lost, and the next step can still run. */
 export const POST = handle(async (req: Request, ctx: Ctx) => {

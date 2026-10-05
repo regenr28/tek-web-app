@@ -123,7 +123,7 @@ function restFor(e: unknown) {
 // ---------- calling ----------
 
 type ImagePart = { mime: string; b64: string };
-type CallOpts = { system: string; user: string; images?: ImagePart[]; only?: ProviderId; json?: boolean; maxTokens?: number };
+type CallOpts = { system: string; user: string; images?: ImagePart[]; only?: ProviderId; json?: boolean; maxTokens?: number; coolOnFail?: boolean };
 
 export class AiError extends Error {}
 
@@ -131,6 +131,13 @@ export class AiError extends Error {}
  * Tries providers in the Super Admin's order. A provider that hits its limit (429/quota) is put on
  * cooldown and the next one is used immediately, so a long job keeps going across providers.
  */
+/** Gemini has a key, is enabled and isn't resting after a limit/error — used to decide whether to send images. */
+export async function geminiUsable() {
+  const s = await getAiSettings();
+  const cfg = s.providers.gemini;
+  return cfg.enabled && ready("gemini", cfg) && !((await cooldowns()).gemini > Date.now());
+}
+
 export async function callAI(opts: CallOpts): Promise<{ text: string; provider: ProviderId; model: string }> {
   const s = await getAiSettings();
   const errors: string[] = [];
@@ -153,7 +160,7 @@ export async function callAI(opts: CallOpts): Promise<{ text: string; provider: 
       return { text, provider: id, model: cfg.model };
     } catch (e) {
       errors.push(`${PROVIDER_INFO[id].label}: ${(e as Error).message.slice(0, 160)}`);
-      if (!opts.only) await coolDown(id, restFor(e)).catch(() => {});
+      if (!opts.only || opts.coolOnFail) await coolDown(id, restFor(e)).catch(() => {});
     }
   }
   throw new AiError(errors.length ? errors.join(" · ") : "No AI provider is configured. Ask a Super Admin to add a free API key in Settings → AI providers.");
@@ -208,12 +215,19 @@ export async function groqBrowserSearch(question: string): Promise<string> {
   const s = await getAiSettings();
   const key = keyFor("groq", s.providers.groq);
   if (!key) throw new Error("No Groq key");
-  const model = /gpt-oss/.test(s.providers.groq.model) ? s.providers.groq.model : "openai/gpt-oss-120b";
-  const j = await post("https://api.groq.com/openai/v1/chat/completions", { Authorization: `Bearer ${key}` }, {
-    model, temperature: 0.1, reasoning_effort: "low", tools: [{ type: "browser_search" }], tool_choice: "required",
-    messages: [{ role: "user", content: question }],
-  });
-  return j?.choices?.[0]?.message?.content || "";
+  // The 20b model has its own free daily quota, so searching doesn't use up the quota the AI fill step needs.
+  const models = ["openai/gpt-oss-20b", "openai/gpt-oss-120b"];
+  let last: unknown;
+  for (const model of models) {
+    try {
+      const j = await post("https://api.groq.com/openai/v1/chat/completions", { Authorization: `Bearer ${key}` }, {
+        model, temperature: 0.1, reasoning_effort: "low", tools: [{ type: "browser_search" }], tool_choice: "required",
+        messages: [{ role: "user", content: question }],
+      });
+      return j?.choices?.[0]?.message?.content || "";
+    } catch (e) { last = e; if (!(e instanceof HttpFail) || ![429, 404, 400].includes(e.status)) throw e; }
+  }
+  throw last;
 }
 
 export async function listModels(id: ProviderId): Promise<string[]> {

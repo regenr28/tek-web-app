@@ -16,7 +16,7 @@ QA audits for Duda sites using **only the preview link** — no Duda API require
 3. Builds a first **Data Collection** draft with the guideline rules: phone as `(000) 000-0000` + area-code check against the shop's state, job-applications email (falls back to Primary Contact Email with a note), *Auto Repair Shop*, *All Makes and Models* / *EXCEPT …*, Title-Case services, *State Inspection* for TX, HI, VA, MD, MA, WV, VT, NC, NH, LA, certifications mentioned in About Us/FAQ, special instructions.
 4. You create the Duda site with that template and paste the **Editor URL** → the preview link for QA is filled automatically.
 5. **Run all research** (each step can also run alone):
-   - **Google Business Profile** — exact address (no country), `https://www.google.com/maps?cid=…`, Place ID, City/ST, name/phone/hours compared with Jira, mobile-shop warning. Needs a free SerpApi or Serper key, or paste the GBP link and it reads the CID/Place ID from it.
+   - **Google Business Profile** — exact address (no country), `https://www.google.com/maps?cid=…`, Place ID, City/ST, name/phone/hours compared with Jira, mobile-shop warning. First reads the shop's own website for its Google Maps embed / review / directions link (free, no credits); then uses a free Maps key (OpenWeb Ninja, SerpApi, Apify, HasData or Serper) to get the exact address and confirm.
    - **Existing website** — reads the homepage + about/coupons/warranty/financing/services/amenities/FAQ pages, warns if it looks old or rebranded, decides the domain (with a note), collects social links.
    - **Web & social search** — Facebook, X, Instagram, YouTube, LinkedIn, Yelp (4★+ only), Pinterest, Vimeo, Snapchat, Reddit, TripAdvisor, Foursquare, TikTok; NAPA AutoCare, Carfax, RepairPal, BBB, AAA listings.
    - **AI fill & format** — hours in the house style, services to the minimum, amenities to the template's count, coupons/warranty/financing/certifications/About Us found online (Jira is always the fact; extras get a note).
@@ -49,7 +49,8 @@ Header / footer / nav findings are reported once as **Global** instead of once p
 | **Vercel (Hobby)** | Runs the app, auto-deploys every commit | Free, no card |
 | **Turso** | Database | 5 GB, no card, doesn't pause |
 | **Cerebras**, **Mistral**, **Groq**, **Cloudflare Workers AI**, **Gemini**, **OpenRouter** | AI (used in order, automatic fallback) | Free tiers, no card |
-| **SerpApi** / **Serper** / **Tavily** | Research search (GBP Place ID + CID, socials, listings) | 250/month · 2,500 one-time · 1,000/month, no card |
+| **OpenWeb Ninja** / **SerpApi** / **Apify** / **HasData** / **Serper** | GBP lookup (Place ID + CID, address) | 500/mo · 250/mo · ~1,250/mo · ~100/mo · 2,500 one-time, no card |
+| **Groq AI search** → **Tavily** / **Linkup** / **Exa** | Web & social search | Groq daily limits; Tavily 1,000/mo; Linkup & Exa monthly free credit, no card |
 
 Login, two-factor codes and the security log are built in — no paid auth service needed.
 

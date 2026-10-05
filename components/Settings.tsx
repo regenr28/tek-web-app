@@ -64,6 +64,7 @@ function AiSettings() {
       <p className="muted">Free AI fills and reviews Data Collection, body copy and alt text. Providers are used top to bottom: when one hits its free limit it rests automatically and the next one takes over, so a job never stops halfway. Keys are encrypted in the database; Vercel env vars (CEREBRAS_API_KEY, MISTRAL_API_KEY, GROQ_API_KEY, CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID, GEMINI_API_KEY, OPENROUTER_API_KEY) work too.</p>
       {err && <div className="alert error">{err}</div>}
       <label className="row"><input type="checkbox" checked={ai.visionAlt} onChange={(e) => save({ visionAlt: e.target.checked })} /> Let Gemini look at the actual images when checking alt text</label>
+      <p className="muted small" style={{ marginTop: -6 }}>Only Gemini can see pictures. When Gemini is off, has no key or is resting, alt text is still checked by the other AIs using the file name, the alt text and the words around the image.</p>
       {ai.order.map((id, i) => {
         const p = ai.providers[id];
         return (
@@ -268,12 +269,13 @@ function SecurityLog() {
   );
 }
 
-type SProv = { enabled: boolean; hasKey: boolean; keyHint: string; keySource: string; usedThisMonth: number; label: string; signup: string; note: string; maps: boolean };
+type SProv = { enabled: boolean; hasKey: boolean; keyHint: string; keySource: string; usedThisMonth: number; label: string; signup: string; note: string; maps: boolean; web: boolean };
 type Rules = { defaultAmenities: number; defaultServices: number; rules: { match: string; amenities: number }[] };
 
 function ResearchSettings({ canEdit }: { canEdit: boolean }) {
-  const [d, setD] = useState<{ search: { order: string[]; providers: Record<string, SProv> }; templates: Rules } | null>(null);
+  const [d, setD] = useState<{ search: { order: string[]; aiFirst: boolean; providers: Record<string, SProv> }; templates: Rules } | null>(null);
   const [keys, setKeys] = useState<Record<string, string>>({});
+  const [tests, setTests] = useState<Record<string, string>>({});
   const [rulesText, setRulesText] = useState("");
   const [msg, setMsg] = useState(""); const [err, setErr] = useState("");
   const apply = (x: NonNullable<typeof d>) => { setD(x); setRulesText(x.templates.rules.map((r) => `${r.match} = ${r.amenities}`).join("\n")); };
@@ -290,16 +292,22 @@ function ResearchSettings({ canEdit }: { canEdit: boolean }) {
   return (
     <div className="stack" style={{ maxWidth: 820 }}>
       <h3 style={{ margin: 0 }}>Search keys (free, no credit card)</h3>
-      <p className="muted small">Used by Data Collection to find the Google Business Profile (Place ID + CID), social accounts, listings and coupons. Tried top to bottom; if one runs out of free searches the next is used. Each project uses about 2 Maps + 2–3 web searches; results are cached so re-running doesn&apos;t spend credits twice.</p>
-      {d.search.order.map((id) => {
+      <p className="muted small">Used by Data Collection to find the Google Business Profile (Place ID + CID), social accounts, listings and coupons. All free with no credit card. The GBP is first looked for on the shop&apos;s own website (map embed / review links — costs nothing); a Maps search is only used when that fails. Providers are tried top to bottom; one that runs out of free searches rests and the next is used. Results are cached per project, so re-running doesn&apos;t spend credits twice.</p>
+      <label className="row small"><input type="checkbox" disabled={!canEdit} checked={d.search.aiFirst} onChange={(e) => save({ search: { aiFirst: e.target.checked } })} /> Use Groq AI search first for web &amp; social searches (saves the search credits for Maps; anything it finds is marked &quot;Review&quot;)</label>
+      {d.search.order.map((id, idx) => {
         const p = d.search.providers[id];
+        const move = (dir: number) => { const o = [...d.search.order]; const j = idx + dir; if (j < 0 || j >= o.length) return; [o[idx], o[j]] = [o[j], o[idx]]; save({ search: { order: o } }); };
         return (
           <div key={id} className="card" style={{ boxShadow: "none" }}>
             <div className="row between">
-              <div className="row"><b>{p.label}</b>{p.maps && <span className="badge accent">Maps + web</span>}
+              <div className="row"><b>{idx + 1}. {p.label}</b><span className={`badge ${p.maps ? "accent" : ""}`}>{p.maps && p.web ? "Maps + web" : p.maps ? "Maps" : "Web"}</span>
                 {p.hasKey ? <span className="badge ok">key {p.keySource === "env" ? "from env" : "saved"} · {p.keyHint}</span> : <span className="badge">no key</span>}
                 <span className="muted small">{p.usedThisMonth} used this month</span></div>
-              {canEdit && <label className="row small" style={{ gap: 4 }}><input type="checkbox" checked={p.enabled} onChange={(e) => save({ search: { providers: { [id]: { enabled: e.target.checked } } } })} /> enabled</label>}
+              {canEdit && <div className="row small" style={{ gap: 6 }}>
+                <label className="row" style={{ gap: 4 }}><input type="checkbox" checked={p.enabled} onChange={(e) => save({ search: { providers: { [id]: { enabled: e.target.checked } } } })} /> enabled</label>
+                <button className="sm" disabled={idx === 0} onClick={() => move(-1)} aria-label="Move up">↑</button>
+                <button className="sm" disabled={idx === d.search.order.length - 1} onClick={() => move(1)} aria-label="Move down">↓</button>
+              </div>}
             </div>
             <div className="muted small" style={{ margin: "4px 0 8px" }}>{p.note} <a href={p.signup} target="_blank" rel="noreferrer">Get a free key ↗</a></div>
             {canEdit && (
@@ -307,8 +315,14 @@ function ResearchSettings({ canEdit }: { canEdit: boolean }) {
                 <input type="password" autoComplete="off" placeholder={p.hasKey ? "•••••• (leave blank to keep)" : "Paste API key"} value={keys[id] || ""} onChange={(e) => setKeys({ ...keys, [id]: e.target.value })} />
                 <button className="sm" disabled={!keys[id]} onClick={async () => { await save({ search: { providers: { [id]: { apiKey: keys[id] } } } }); setKeys({ ...keys, [id]: "" }); }}>Save</button>
                 {p.keySource === "settings" && <button className="sm ghost" onClick={() => save({ search: { providers: { [id]: { clearKey: true } } } })}>Remove</button>}
+                <button className="sm" disabled={!p.hasKey || tests[id] === "Testing…"} title="Runs one real search (uses 1 free credit)" onClick={async () => {
+                  setTests((t) => ({ ...t, [id]: "Testing…" }));
+                  try { const r = await api<{ ok: boolean; message: string }>("/api/settings/research/test", { body: { id } }); setTests((t) => ({ ...t, [id]: `${r.ok ? "✓" : "✕"} ${r.message}` })); }
+                  catch (e) { setTests((t) => ({ ...t, [id]: `✕ ${(e as Error).message}` })); }
+                }}>Test</button>
               </div>
             )}
+            {tests[id] && <div className="small" style={{ marginTop: 6 }}>{tests[id]}</div>}
           </div>
         );
       })}

@@ -2,7 +2,7 @@ import { all, one, run, batch } from "./db";
 import { discover, fetchHtml, extract, scopeFor, pagePath, scoped, canonical, type PageData, type Block, type Img, type Link } from "./crawl";
 import { auditPage, sitewide, fingerprint, GLOBAL_PATH, type Finding, type Severity } from "./rules";
 import { normalizeFacts, type Facts } from "./facts";
-import { callAI, parseJson, fetchImageForAi, getAiSettings } from "./ai";
+import { callAI, parseJson, fetchImageForAi, getAiSettings, geminiUsable } from "./ai";
 import { HttpError } from "./auth";
 
 type SiteRow = { id: number; name: string; preview_url: string; facts_json: string | null };
@@ -213,13 +213,19 @@ export async function aiPage(siteId: number, runId: number, pageId: number, kind
     const imgs = data.images.filter((i: Img) => !i.decorative && (includeGlobal || !i.global));
     for (let i = 0; i < imgs.length; i += 8) {
       const chunk = imgs.slice(i, i + 8);
-      const withVision = s.visionAlt && s.providers.gemini.enabled;
-      const parts = withVision ? await Promise.all(chunk.map((im) => fetchImageForAi(im.src))) : [];
-      const listed = chunk.map((im, k) => ({ im, part: parts[k] || null }));
-      const images = listed.filter((x) => x.part).map((x) => x.part!);
-      const user = `VERIFIED FACTS: ${factsBrief(site.facts)}\nPAGE: ${p.path}\n\nIMAGES${images.length ? " (image data attached, in this order, for entries marked [attached])" : ""}:\n` +
-        listed.map(({ im, part }) => `{"id":${im.id},"file":${JSON.stringify(im.src.split("/").pop()?.split("?")[0])},"alt":${JSON.stringify(im.alt)},"nearbyText":${JSON.stringify(im.context.slice(0, 160))}}${part ? " [attached]" : ""}`).join("\n");
-      const res = await callAI({ system: ALT_SYSTEM, user, images });
+      const prompt = (withImages: boolean, listed: { im: Img; part: unknown }[]) =>
+        `VERIFIED FACTS: ${factsBrief(site.facts)}\nPAGE: ${p.path}\n\nIMAGES${withImages ? " (image data attached, in this order, for entries marked [attached])" : ""}:\n` +
+        listed.map(({ im, part }) => `{"id":${im.id},"file":${JSON.stringify(im.src.split("/").pop()?.split("?")[0])},"alt":${JSON.stringify(im.alt)},"nearbyText":${JSON.stringify(im.context.slice(0, 160))}}${withImages && part ? " [attached]" : ""}`).join("\n");
+      let res: Awaited<ReturnType<typeof callAI>> | null = null;
+      // Images only go to Gemini. If Gemini is off, has no key, is resting or blocked, check from text only
+      // (never tell another AI that images are attached when they aren't).
+      if (s.visionAlt && s.providers.gemini.enabled && (await geminiUsable())) {
+        const parts = await Promise.all(chunk.map((im) => fetchImageForAi(im.src)));
+        const listed = chunk.map((im, k) => ({ im, part: parts[k] || null }));
+        const images = listed.filter((x) => x.part).map((x) => x.part!);
+        if (images.length) res = await callAI({ system: ALT_SYSTEM, user: prompt(true, listed), images, only: "gemini", coolOnFail: true }).catch(() => null);
+      }
+      res ||= await callAI({ system: ALT_SYSTEM, user: prompt(false, chunk.map((im) => ({ im, part: null }))) });
       used.push(`${res.provider}:${res.model}`);
       const j = parseJson<{ issues?: AiIssue[] }>(res.text);
       for (const it of j?.issues || []) {

@@ -12,8 +12,9 @@ export const GET = handle(async () => {
 const Prov = z.object({ enabled: z.boolean().optional(), apiKey: z.string().trim().max(300).optional(), clearKey: z.boolean().optional() }).strict();
 const Body = z.object({
   search: z.object({
-    order: z.array(z.enum(SEARCH_IDS as [string, ...string[]])).max(3).optional(),
-    providers: z.object({ serpapi: Prov.optional(), serper: Prov.optional(), tavily: Prov.optional() }).strict().optional(),
+    order: z.array(z.enum(SEARCH_IDS as [string, ...string[]])).max(SEARCH_IDS.length).optional(),
+    aiFirst: z.boolean().optional(),
+    providers: z.partialRecord(z.enum(SEARCH_IDS as [string, ...string[]]), Prov).optional(),
   }).strict().optional(),
   templates: z.object({
     defaultAmenities: z.number().int().min(0).max(40),

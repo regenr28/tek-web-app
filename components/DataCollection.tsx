@@ -108,8 +108,8 @@ export default function DataCollection({ siteId, onChanged }: { siteId: number; 
         </div>
         {(!d.available.maps || !d.available.web || !d.available.ai) && (
           <div className="small alert warning">
-            {!d.available.maps && <div>• No Google Maps search key — the GBP step will read the CID/Place ID from a GBP link you paste. Add a free <b>SerpApi</b> key in Settings → Research to find it automatically.</div>}
-            {!d.available.web && <div>• No web search key — social/listing search will try Groq browser search. A free SerpApi/Serper/Tavily key is more reliable.</div>}
+            {!d.available.maps && <div>• No Maps search key — the GBP step will look for the shop&apos;s map / review link on their website (free). For shops whose website has none, add a free <b>OpenWeb Ninja</b>, <b>SerpApi</b> or <b>Apify</b> key in Settings → Research.</div>}
+            {!d.available.web && <div>• No web search key — social/listing search uses Groq AI search only. A free Tavily, Linkup or Exa key adds a backup when Groq hits its daily limit.</div>}
             {!d.available.ai && <div>• No AI key — add Cerebras, Mistral, Groq or Cloudflare keys in Settings → AI providers.</div>}
           </div>
         )}

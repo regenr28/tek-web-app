@@ -7,6 +7,24 @@ QA audits for Duda sites using **only the preview link** — no Duda API require
 3. **Run audit** → the app crawls the preview, checks every page against the Jira facts, runs rule checks, and (optionally) asks a free AI to review body copy and image alt text.
 4. The team works the findings table: page, CSS selector (click to copy), found vs. expected, assignee, done checkbox, notes, ignore (false positive). Re-running an audit keeps done/ignored state and auto-resolves anything that's gone.
 
+## Projects & Data Collection
+
+**+ Add Project** → drop the Jira **Export Excel** (.xlsx) of the Website Build work item. The app:
+
+1. Detects the **website type** (Basic / Advanced / MSO) and the **template** (e.g. *Single Location Template 31* from “Select Your Preferred … Site Design”).
+2. Lists the **requested pages** (column D of the guideline sheet).
+3. Builds a first **Data Collection** draft with the guideline rules: phone as `(000) 000-0000` + area-code check against the shop's state, job-applications email (falls back to Primary Contact Email with a note), *Auto Repair Shop*, *All Makes and Models* / *EXCEPT …*, Title-Case services, *State Inspection* for TX, HI, VA, MD, MA, WV, VT, NC, NH, LA, certifications mentioned in About Us/FAQ, special instructions.
+4. You create the Duda site with that template and paste the **Editor URL** → the preview link for QA is filled automatically.
+5. **Run all research** (each step can also run alone):
+   - **Google Business Profile** — exact address (no country), `https://www.google.com/maps?cid=…`, Place ID, City/ST, name/phone/hours compared with Jira, mobile-shop warning. Needs a free SerpApi or Serper key, or paste the GBP link and it reads the CID/Place ID from it.
+   - **Existing website** — reads the homepage + about/coupons/warranty/financing/services/amenities/FAQ pages, warns if it looks old or rebranded, decides the domain (with a note), collects social links.
+   - **Web & social search** — Facebook, X, Instagram, YouTube, LinkedIn, Yelp (4★+ only), Pinterest, Vimeo, Snapchat, Reddit, TripAdvisor, Foursquare, TikTok; NAPA AutoCare, Carfax, RepairPal, BBB, AAA listings.
+   - **AI fill & format** — hours in the house style, services to the minimum, amenities to the template's count, coupons/warranty/financing/certifications/About Us found online (Jira is always the fact; extras get a note).
+   - **AI review** — flags contradictions and missing items.
+6. **Copy for Google Sheet** pastes the whole block (labels, values, notes, pages) into your guideline sheet. The same data becomes the QA audit's facts automatically.
+
+AI providers are tried in order (default: Cerebras → Mistral → Groq → Cloudflare Workers AI → Gemini → OpenRouter). A provider that hits its free limit rests automatically and the next one continues, so research never stops halfway. Search results and website text are cached per project, so re-running doesn't spend credits twice.
+
 ## What it checks
 
 | Area | Checks |
@@ -30,9 +48,8 @@ Header / footer / nav findings are reported once as **Global** instead of once p
 | **GitHub** | Stores the code | Free, no card |
 | **Vercel (Hobby)** | Runs the app, auto-deploys every commit | Free, no card |
 | **Turso** | Database | 5 GB, no card, doesn't pause |
-| **Google Gemini** (AI Studio key) | AI copy + alt-text review | Free tier, no card |
-| **Groq** | Backup AI | Free tier, no card |
-| **OpenRouter** (`openrouter/free`) | Backup AI | 50 requests/day free, no card |
+| **Cerebras**, **Mistral**, **Groq**, **Cloudflare Workers AI**, **Gemini**, **OpenRouter** | AI (used in order, automatic fallback) | Free tiers, no card |
+| **SerpApi** / **Serper** / **Tavily** | Research search (GBP Place ID + CID, socials, listings) | 250/month · 2,500 one-time · 1,000/month, no card |
 
 Login, two-factor codes and the security log are built in — no paid auth service needed.
 

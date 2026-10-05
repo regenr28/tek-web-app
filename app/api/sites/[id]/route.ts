@@ -14,9 +14,9 @@ export const GET = handle(async (_req: Request, ctx: Ctx) => {
   if (!s) throw new HttpError(404, "Site not found");
   const lastRun = s.last_run_id ? await one("SELECT r.*, u.name AS started_by_name FROM runs r LEFT JOIN users u ON u.id = r.started_by WHERE r.id = ?", [s.last_run_id]) : null;
   const pages = s.last_run_id ? await all("SELECT id, url, path, title, status_code, error FROM pages WHERE run_id = ? ORDER BY length(path), path", [s.last_run_id]) : [];
-  const { facts_json, ...rest } = s;
+  const { facts_json, jira_json, collection_json: _c, research_json: _r, ...rest } = s as typeof s & { jira_json?: string | null; collection_json?: string | null; research_json?: string | null };
   return Response.json({
-    site: { ...rest, facts: facts_json ? normalizeFacts(JSON.parse(facts_json)) : null },
+    site: { ...rest, has_project: !!jira_json, facts: facts_json ? normalizeFacts(JSON.parse(facts_json)) : null },
     lastRun, pages, dudaApi: dudaEnabled(), ai: await aiAvailable(),
   });
 });

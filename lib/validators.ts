@@ -17,7 +17,7 @@ export async function assertCrawlable(url: string) {
 
 export const SiteCreate = z.object({
   name: z.string().trim().min(1).max(120),
-  preview_url: httpUrl,
+  preview_url: httpUrl.optional().or(z.literal("")),
   live_url: httpUrl.optional().or(z.literal("")),
   jira_key: z.string().trim().max(40).regex(/^[A-Za-z0-9_-]*$/).optional(),
   assignee_id: z.number().int().positive().nullable().optional(),

@@ -3,11 +3,12 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, ago, STATUS_LABEL, STATUS_TONE, type Member } from "./api";
 import FactsEditor from "./FactsEditor";
+import DataCollection from "./DataCollection";
 import { emptyFacts, normalizeFacts, type Facts } from "@/lib/facts";
 
 type Site = {
   id: number; name: string; preview_url: string; live_url: string | null; jira_key: string | null; duda_site_id: string | null;
-  status: string; assignee_id: number | null; notes: string | null; facts: Facts | null; facts_source: string | null; facts_raw_text: string | null; last_run_id: number | null;
+  status: string; assignee_id: number | null; notes: string | null; facts: Facts | null; facts_source: string | null; facts_raw_text: string | null; last_run_id: number | null; has_project?: boolean; template?: string | null; project_type?: string | null;
 };
 type Run = { id: number; started_at: string; finished_at: string | null; status: string; page_count: number; finding_count: number; ai_enabled: number; started_by_name: string };
 type PageRow = { id: number; url: string; path: string; title: string; status_code: number; error: string | null };
@@ -22,7 +23,7 @@ export default function SiteView({ id, me }: { id: number; me: Me }) {
   const [data, setData] = useState<{ site: Site; lastRun: Run | null; pages: PageRow[]; dudaApi: boolean; ai: boolean } | null>(null);
   const [findings, setFindings] = useState<Finding[]>([]);
   const [members, setMembers] = useState<Member[]>([]);
-  const [tab, setTab] = useState<"findings" | "facts" | "pages" | "details">("findings");
+  const [tab, setTab] = useState<"collection" | "findings" | "facts" | "pages" | "details" | null>(null);
   const [err, setErr] = useState("");
 
   const load = useCallback(async () => {
@@ -33,7 +34,11 @@ export default function SiteView({ id, me }: { id: number; me: Me }) {
     } catch (e) { setErr((e as Error).message); }
   }, [id]);
   useEffect(() => { load(); api<Member[]>("/api/users").then((m) => setMembers(m.filter((x) => x.active))); }, [load]);
-  useEffect(() => { if (data && !data.site.facts && tab === "findings" && !findings.length) setTab("facts"); }, [data]); // eslint-disable-line
+  useEffect(() => {
+    if (!data || tab) return;
+    const q = new URLSearchParams(window.location.search).get("tab");
+    setTab(q === "collection" || q === "findings" || q === "facts" || q === "pages" || q === "details" ? q : data.site.has_project ? "collection" : "findings");
+  }, [data]); // eslint-disable-line
 
   if (!data) return <p className="muted">{err || "Loading…"}</p>;
   const { site } = data;
@@ -44,9 +49,10 @@ export default function SiteView({ id, me }: { id: number; me: Me }) {
     <div className="stack">
       <div className="row between">
         <div>
-          <div className="small"><Link href="/">← Sites</Link></div>
+          <div className="small"><Link href="/">← Projects</Link></div>
           <h1 style={{ marginTop: 4 }}>{site.name} {site.jira_key && <span className="badge">{site.jira_key}</span>}</h1>
-          <a href={site.preview_url} target="_blank" rel="noreferrer" className="small">{site.preview_url} ↗</a>
+          {site.template && <span className="badge accent" style={{ marginRight: 6 }}>{site.template}</span>}
+          {site.preview_url ? <a href={site.preview_url} target="_blank" rel="noreferrer" className="small">{site.preview_url} ↗</a> : <span className="muted small">No preview link yet</span>}
         </div>
         <div className="row">
           <select value={site.status} onChange={(e) => patch({ status: e.target.value })} style={{ width: 170 }} className={`badge ${STATUS_TONE[site.status]}`}>
@@ -60,24 +66,25 @@ export default function SiteView({ id, me }: { id: number; me: Me }) {
 
       {err && <div className="alert error" onClick={() => setErr("")}>{err}</div>}
 
-      <AuditPanel site={site} lastRun={data.lastRun} aiAvailable={data.ai} onDone={load} onError={setErr} />
+      {tab === "findings" && <AuditPanel site={site} lastRun={data.lastRun} aiAvailable={data.ai} onDone={load} onError={setErr} />}
 
-      <div className="row">
+      {tab === "findings" && <div className="row">
         <div className="stat"><b style={{ color: "var(--error)" }}>{open.filter((f) => f.severity === "error").length}</b><span>Errors</span></div>
         <div className="stat"><b style={{ color: "var(--warning)" }}>{open.filter((f) => f.severity === "warning").length}</b><span>Warnings</span></div>
         <div className="stat"><b style={{ color: "var(--info)" }}>{open.filter((f) => f.severity === "info").length}</b><span>Info</span></div>
         <div className="stat"><b style={{ color: "var(--ok)" }}>{findings.filter((f) => f.status === "done").length}</b><span>Done</span></div>
         <div className="stat"><b>{findings.filter((f) => f.status === "resolved").length}</b><span>Auto-resolved</span></div>
-      </div>
+      </div>}
 
       <div className="card">
         <div className="tabs">
-          {(["findings", "facts", "pages", "details"] as const).map((t) => (
+          {(["collection", "findings", "facts", "pages", "details"] as const).map((t) => (
             <button key={t} className={tab === t ? "active" : ""} onClick={() => setTab(t)}>
-              {t === "findings" ? `Findings (${open.length})` : t === "facts" ? <>Jira facts {!site.facts && <span className="badge warning">missing</span>}</> : t === "pages" ? `Pages (${data.pages.length})` : "Details"}
+              {t === "collection" ? "Data Collection" : t === "findings" ? `QA Audit (${open.length})` : t === "facts" ? <>QA facts {!site.facts && <span className="badge warning">missing</span>}</> : t === "pages" ? `Pages (${data.pages.length})` : "Details"}
             </button>
           ))}
         </div>
+        {tab === "collection" && <DataCollection siteId={id} onChanged={load} />}
         {tab === "findings" && <FindingsTable siteId={id} findings={findings} members={members} me={me} reload={load} onError={setErr} />}
         {tab === "facts" && <FactsTab site={site} dudaApi={data.dudaApi} ai={data.ai} onSaved={load} onError={setErr} />}
         {tab === "pages" && <PagesTab pages={data.pages} findings={findings} />}

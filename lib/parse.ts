@@ -1,12 +1,13 @@
 /** Parse Jira exports (PDF / XLSX / CSV / TXT) into plain text + rows. Nothing is stored except the result. */
 
 import { HttpError } from "./security";
+import { readXlsx } from "./xlsx";
 
 const isPdf = (b: Uint8Array) => b[0] === 0x25 && b[1] === 0x50 && b[2] === 0x44 && b[3] === 0x46; // %PDF
-const isZip = (b: Uint8Array) => b[0] === 0x50 && b[1] === 0x4b && b[2] === 0x03 && b[3] === 0x04; // PK..
+export const isZip = (b: Uint8Array) => b[0] === 0x50 && b[1] === 0x4b && b[2] === 0x03 && b[3] === 0x04; // PK..
 
 /** Reads the ZIP central directory and rejects archives that would inflate to something huge (zip bombs). */
-function assertSafeZip(b: Uint8Array, maxTotal = 40 * 1024 * 1024, maxEntries = 2000) {
+export function assertSafeZip(b: Uint8Array, maxTotal = 40 * 1024 * 1024, maxEntries = 2000) {
   const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
   let eocd = -1;
   for (let i = b.length - 22; i >= Math.max(0, b.length - 65557); i--) if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
@@ -42,19 +43,13 @@ export async function parseUpload(file: File): Promise<{ text: string; rows: str
   }
 
   if (name.endsWith(".xlsx") || name.endsWith(".xlsm")) {
-    const ExcelJS = (await import("exceljs")).default;
-    const wb = new ExcelJS.Workbook();
-    await wb.xlsx.load(buf.buffer as ArrayBuffer);
     const rows: string[][] = [];
     const lines: string[] = [];
-    wb.eachSheet((ws) => {
-      lines.push(`## ${ws.name}`);
-      ws.eachRow({ includeEmpty: false }, (row) => {
-        const vals = (row.values as unknown[]).slice(1).map(cellText);
-        rows.push(vals);
-        lines.push(vals.filter(Boolean).join(" | "));
-      });
-    });
+    for (const sh of readXlsx(buf)) {
+      lines.push(`## ${sh.name}`);
+      for (const r of sh.rows) { if (r.some(Boolean)) { rows.push(r); lines.push(r.filter(Boolean).join(" | ")); } }
+      if (rows.length) break; // first non-empty sheet holds the work item fields
+    }
     const t = transposeHeaderRows(rows);
     return { text: lines.join("\n"), rows: t.length ? t : rows };
   }
@@ -66,19 +61,6 @@ export async function parseUpload(file: File): Promise<{ text: string; rows: str
     return { text: rows.map((r) => r.join(" | ")).join("\n"), rows: t.length ? t : rows };
   }
   return { text, rows: [] };
-}
-
-function cellText(v: unknown): string {
-  if (v == null) return "";
-  if (typeof v === "object") {
-    const o = v as Record<string, unknown>;
-    if ("text" in o) return String(o.text);
-    if ("richText" in o && Array.isArray(o.richText)) return o.richText.map((r: { text: string }) => r.text).join("");
-    if ("result" in o) return String(o.result);
-    if (v instanceof Date) return v.toISOString().slice(0, 10);
-    if ("hyperlink" in o) return String(o.hyperlink);
-  }
-  return String(v).trim();
 }
 
 /** A Jira export is often one header row + one data row. Turn that into [label, value] pairs. */

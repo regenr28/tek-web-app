@@ -133,6 +133,14 @@ const COLUMNS: [table: string, column: string, ddl: string][] = [
   ["users", "must_change_password", "INTEGER NOT NULL DEFAULT 0"],
   ["users", "password_changed_at", "TEXT"],
   ["users", "last_login_at", "TEXT"],
+  // Projects (Data Collection)
+  ["sites", "project_type", "TEXT"],
+  ["sites", "template", "TEXT"],
+  ["sites", "jira_json", "TEXT"],
+  ["sites", "editor_url", "TEXT"],
+  ["sites", "collection_json", "TEXT"],
+  ["sites", "research_json", "TEXT"],
+  ["sites", "tekmetric_id", "TEXT"],
 ];
 
 async function migrate() {

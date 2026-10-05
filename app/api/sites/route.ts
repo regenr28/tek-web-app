@@ -7,7 +7,7 @@ import { guessSiteName } from "@/lib/duda";
 export const GET = handle(async () => {
   await requireUser();
   const rows = await all(`
-    SELECT s.id, s.name, s.preview_url, s.live_url, s.jira_key, s.status, s.assignee_id, s.updated_at,
+    SELECT s.id, s.name, s.preview_url, s.live_url, s.jira_key, s.status, s.assignee_id, s.updated_at, s.project_type, s.template, s.editor_url,
            u.name AS assignee_name, (s.facts_json IS NOT NULL) AS has_facts,
            r.started_at AS last_run_at, r.status AS last_run_status, r.page_count,
            (SELECT COUNT(*) FROM findings f WHERE f.site_id = s.id AND f.status = 'open') AS open_count,
@@ -24,10 +24,10 @@ export const POST = handle(async (req: Request) => {
   const me = await requireUser();
   await rateLimit(`site-create:${me.id}`, 200, 3600);
   const b = await parseBody(req, SiteCreate);
-  await assertCrawlable(b.preview_url);
+  if (b.preview_url) await assertCrawlable(b.preview_url);
   const { lastId } = await run(
     "INSERT INTO sites (name, preview_url, live_url, jira_key, assignee_id, duda_site_id, created_by) VALUES (?,?,?,?,?,?,?)",
-    [b.name, b.preview_url, b.live_url || null, b.jira_key || null, b.assignee_id || null, guessSiteName(b.preview_url) || null, me.id]
+    [b.name, b.preview_url || "", b.live_url || null, b.jira_key || null, b.assignee_id || null, b.preview_url ? guessSiteName(b.preview_url) || null : null, me.id]
   );
   return Response.json({ id: lastId });
 });

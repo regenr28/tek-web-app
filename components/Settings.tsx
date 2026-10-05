@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { api, ago, type Member } from "./api";
 
 type Me = { id: number; name: string; email: string; role: string };
-type Prov = { enabled: boolean; model: string; baseUrl: string; hasKey: boolean; keyHint: string; keySource: string; label: string; defaultModel: string; signup: string; note: string };
+type Prov = { enabled: boolean; model: string; baseUrl: string; accountId?: string; ready?: boolean; coolingUntil?: number | null; hasKey: boolean; keyHint: string; keySource: string; label: string; defaultModel: string; signup: string; note: string };
 type Ai = { order: string[]; visionAlt: boolean; providers: Record<string, Prov> };
 
 export default function Settings({ me, dudaApi }: { me: Me; dudaApi: boolean }) {
@@ -16,11 +16,13 @@ export default function Settings({ me, dudaApi }: { me: Me; dudaApi: boolean }) 
         <div className="tabs">
           {isSuper && <button className={tab === "security" ? "active" : ""} onClick={() => setTab("security")}>Security</button>}
           {isSuper && <button className={tab === "ai" ? "active" : ""} onClick={() => setTab("ai")}>AI providers</button>}
+          {isAdmin && <button className={tab === "research" ? "active" : ""} onClick={() => setTab("research")}>Research</button>}
           {isAdmin && <button className={tab === "members" ? "active" : ""} onClick={() => setTab("members")}>Members</button>}
           <button className={tab === "duda" ? "active" : ""} onClick={() => setTab("duda")}>Duda API</button>
           {isSuper && <button className={tab === "log" ? "active" : ""} onClick={() => setTab("log")}>Security log</button>}
         </div>
         {tab === "ai" && isSuper && <AiSettings />}
+        {tab === "research" && isAdmin && <ResearchSettings canEdit={isSuper} />}
         {tab === "members" && isAdmin && <Members me={me} />}
         {tab === "duda" && <DudaInfo enabled={dudaApi} />}
         {tab === "security" && isSuper && <SecuritySettings />}
@@ -59,7 +61,7 @@ function AiSettings() {
 
   return (
     <div className="stack">
-      <p className="muted">Free AI reviews body copy and image alt text. Providers are tried top to bottom — if one is rate-limited, the next one takes over. Keys are encrypted in the database; env vars work as a fallback.</p>
+      <p className="muted">Free AI fills and reviews Data Collection, body copy and alt text. Providers are used top to bottom: when one hits its free limit it rests automatically and the next one takes over, so a job never stops halfway. Keys are encrypted in the database; Vercel env vars (CEREBRAS_API_KEY, MISTRAL_API_KEY, GROQ_API_KEY, CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID, GEMINI_API_KEY, OPENROUTER_API_KEY) work too.</p>
       {err && <div className="alert error">{err}</div>}
       <label className="row"><input type="checkbox" checked={ai.visionAlt} onChange={(e) => save({ visionAlt: e.target.checked })} /> Let Gemini look at the actual images when checking alt text</label>
       {ai.order.map((id, i) => {
@@ -70,6 +72,7 @@ function AiSettings() {
               <div className="row">
                 <b>{i + 1}. {p.label}</b>
                 {p.hasKey ? <span className="badge ok">key {p.keySource === "env" ? "from env" : "saved"} · {p.keyHint}</span> : <span className="badge">no key</span>}
+                {p.coolingUntil && <span className="badge warning" title="Hit its free limit — skipped until then">resting until {new Date(p.coolingUntil).toLocaleTimeString()}</span>}
                 <label className="row small" style={{ gap: 4 }}><input type="checkbox" checked={p.enabled} onChange={(e) => setP(id, { enabled: e.target.checked })} /> enabled</label>
               </div>
               <div className="row">
@@ -93,6 +96,11 @@ function AiSettings() {
                   <button className="sm" disabled={!p.hasKey} onClick={() => loadModels(id)} title="Load available models">List</button>
                 </div>
               </label>
+              {id === "cloudflare" && (
+                <label className="field"><span>Cloudflare Account ID</span>
+                  <input defaultValue={p.accountId === "(from env)" ? "" : p.accountId} placeholder={p.accountId === "(from env)" ? "Using CLOUDFLARE_ACCOUNT_ID from env" : "32-character Account ID"} onBlur={(e) => e.target.value && e.target.value !== p.accountId && setP(id, { accountId: e.target.value } as Partial<Prov>)} />
+                </label>
+              )}
               {id === "custom" && (
                 <label className="field"><span>Base URL (OpenAI-compatible)</span>
                   <input defaultValue={p.baseUrl} placeholder="https://api.cerebras.ai/v1" onBlur={(e) => e.target.value !== p.baseUrl && setP(id, { baseUrl: e.target.value })} />
@@ -256,6 +264,63 @@ function SecurityLog() {
           ))}</tbody>
         </table>
       </div>
+    </div>
+  );
+}
+
+type SProv = { enabled: boolean; hasKey: boolean; keyHint: string; keySource: string; usedThisMonth: number; label: string; signup: string; note: string; maps: boolean };
+type Rules = { defaultAmenities: number; defaultServices: number; rules: { match: string; amenities: number }[] };
+
+function ResearchSettings({ canEdit }: { canEdit: boolean }) {
+  const [d, setD] = useState<{ search: { order: string[]; providers: Record<string, SProv> }; templates: Rules } | null>(null);
+  const [keys, setKeys] = useState<Record<string, string>>({});
+  const [rulesText, setRulesText] = useState("");
+  const [msg, setMsg] = useState(""); const [err, setErr] = useState("");
+  const apply = (x: NonNullable<typeof d>) => { setD(x); setRulesText(x.templates.rules.map((r) => `${r.match} = ${r.amenities}`).join("\n")); };
+  useEffect(() => { api<NonNullable<typeof d>>("/api/settings/research").then(apply).catch((e) => setErr(e.message)); }, []);
+  if (!d) return <p className="muted">{err || "Loading…"}</p>;
+  const save = async (body: Record<string, unknown>) => {
+    setErr(""); setMsg("");
+    try { apply(await api("/api/settings/research", { method: "PUT", body })); setMsg("Saved."); } catch (e) { setErr((e as Error).message); }
+  };
+  const saveRules = () => {
+    const rules = rulesText.split("\n").map((l) => l.match(/^(.+?)\s*[=:]\s*(\d+)\s*$/)).filter(Boolean).map((m) => ({ match: m![1].trim(), amenities: Number(m![2]) }));
+    save({ templates: { ...d.templates, rules } });
+  };
+  return (
+    <div className="stack" style={{ maxWidth: 820 }}>
+      <h3 style={{ margin: 0 }}>Search keys (free, no credit card)</h3>
+      <p className="muted small">Used by Data Collection to find the Google Business Profile (Place ID + CID), social accounts, listings and coupons. Tried top to bottom; if one runs out of free searches the next is used. Each project uses about 2 Maps + 2–3 web searches; results are cached so re-running doesn&apos;t spend credits twice.</p>
+      {d.search.order.map((id) => {
+        const p = d.search.providers[id];
+        return (
+          <div key={id} className="card" style={{ boxShadow: "none" }}>
+            <div className="row between">
+              <div className="row"><b>{p.label}</b>{p.maps && <span className="badge accent">Maps + web</span>}
+                {p.hasKey ? <span className="badge ok">key {p.keySource === "env" ? "from env" : "saved"} · {p.keyHint}</span> : <span className="badge">no key</span>}
+                <span className="muted small">{p.usedThisMonth} used this month</span></div>
+              {canEdit && <label className="row small" style={{ gap: 4 }}><input type="checkbox" checked={p.enabled} onChange={(e) => save({ search: { providers: { [id]: { enabled: e.target.checked } } } })} /> enabled</label>}
+            </div>
+            <div className="muted small" style={{ margin: "4px 0 8px" }}>{p.note} <a href={p.signup} target="_blank" rel="noreferrer">Get a free key ↗</a></div>
+            {canEdit && (
+              <div className="row" style={{ flexWrap: "nowrap" }}>
+                <input type="password" autoComplete="off" placeholder={p.hasKey ? "•••••• (leave blank to keep)" : "Paste API key"} value={keys[id] || ""} onChange={(e) => setKeys({ ...keys, [id]: e.target.value })} />
+                <button className="sm" disabled={!keys[id]} onClick={async () => { await save({ search: { providers: { [id]: { apiKey: keys[id] } } } }); setKeys({ ...keys, [id]: "" }); }}>Save</button>
+                {p.keySource === "settings" && <button className="sm ghost" onClick={() => save({ search: { providers: { [id]: { clearKey: true } } } })}>Remove</button>}
+              </div>
+            )}
+          </div>
+        );
+      })}
+      <h3 style={{ margin: "12px 0 0" }}>Template requirements</h3>
+      <p className="muted small">How many Benefits/Amenities each template needs. One rule per line: <code>Single Location Template 31 = 16</code>. Anything not listed uses the default.</p>
+      <div className="row">
+        <label className="field" style={{ width: 180 }}><span>Default amenities</span><input type="number" min={0} max={40} defaultValue={d.templates.defaultAmenities} disabled={!canEdit} onBlur={(e) => canEdit && save({ templates: { ...d.templates, defaultAmenities: Number(e.target.value) } })} /></label>
+        <label className="field" style={{ width: 180 }}><span>Minimum services</span><input type="number" min={0} max={40} defaultValue={d.templates.defaultServices} disabled={!canEdit} onBlur={(e) => canEdit && save({ templates: { ...d.templates, defaultServices: Number(e.target.value) } })} /></label>
+      </div>
+      <textarea rows={6} className="mono" value={rulesText} disabled={!canEdit} onChange={(e) => setRulesText(e.target.value)} placeholder={"Single Location Template 31 = 16\nHP Only Template 5 = 8"} />
+      {canEdit && <div><button className="primary" onClick={saveRules}>Save template rules</button></div>}
+      {msg && <div className="alert">{msg}</div>}{err && <div className="alert error">{err}</div>}
     </div>
   );
 }

@@ -17,7 +17,7 @@ const securityHeaders = [
 const nextConfig: NextConfig = {
   poweredByHeader: false,
   productionBrowserSourceMaps: false,
-  serverExternalPackages: ["@libsql/client", "exceljs", "unpdf"],
+  serverExternalPackages: ["@libsql/client", "unpdf"],
   async headers() {
     return [
       { source: "/:path*", headers: securityHeaders },

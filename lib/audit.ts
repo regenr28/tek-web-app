@@ -43,6 +43,7 @@ async function assertRun(siteId: number, runId: number) {
 
 export async function startRun(siteId: number, userId: number, ai: boolean, maxPages = 60) {
   const site = await loadSite(siteId);
+  if (!site.preview_url) throw new HttpError(400, "No preview link yet — paste the Duda Editor URL in Data Collection (or the preview link under Details).");
   const { pages, errors, scope } = await discover(site.preview_url, maxPages);
   const { lastId: runId } = await run("INSERT INTO runs (site_id, started_by, ai_enabled) VALUES (?,?,?)", [siteId, userId, ai ? 1 : 0]);
   await run("DELETE FROM pages WHERE site_id = ?", [siteId]);

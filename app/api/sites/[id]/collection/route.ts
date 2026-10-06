@@ -5,6 +5,10 @@ import { idOf, type Ctx } from "@/lib/http";
 import { parseBody } from "@/lib/security";
 import { FIELDS, LOC_FIELDS, PER_LOCATION, MSO_LABELS, toSheetTsv, toPlainText, sheetRows, newLocation, combinedCityState, checkPhone, type FieldKey, type LocKey } from "@/lib/collect";
 import { HttpError } from "@/lib/security";
+
+const ORDER: string[] = FIELDS.map((f) => f.key as string).filter((k) => k !== "reviews");
+ORDER.splice(ORDER.indexOf("amenities") + 1, 0, "reviews");
+const rank = (k: string) => ORDER.indexOf(k);
 import { loadProject, saveProject, dudaSiteId, PREVIEW_HOST } from "@/lib/projects";
 import { STEPS } from "@/lib/research";
 import { searchAvailable } from "@/lib/search";
@@ -18,7 +22,9 @@ export const GET = handle(async (_req: Request, ctx: Ctx) => {
   const ev = p.evidence;
   return Response.json({
     collection: p.collection,
-    labels: p.collection.locations.length ? FIELDS.filter((f) => !PER_LOCATION.includes(f.key)).map((f) => ({ ...f, label: MSO_LABELS[f.key] || f.label })) : FIELDS,
+    labels: (p.collection.locations.length ? FIELDS.filter((f) => !PER_LOCATION.includes(f.key)).map((f) => ({ ...f, label: MSO_LABELS[f.key] || f.label })) : [...FIELDS])
+      // on screen, show the reviews right after Benefits/Amenities (in the copied sheet they stay at the bottom)
+      .sort((a, b) => rank(a.key) - rank(b.key)),
     locLabels: LOC_FIELDS,
     tsv: toSheetTsv(p.collection),
     text: toPlainText(p.collection),

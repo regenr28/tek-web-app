@@ -35,6 +35,7 @@ export const FIELDS = [
   { key: "date", label: "Date:" },
   { key: "jiraUrl", label: "Hubspot URL:" },
   { key: "editorUrl", label: "Editor URL:" },
+  { key: "reviews", label: "Top 5 GBP Reviews:" },
 ] as const;
 
 export type FieldKey = (typeof FIELDS)[number]["key"];
@@ -352,6 +353,16 @@ export function applyRules(c: Collection) {
   return c;
 }
 
+/** "Mon–Fri: 8 AM–5 PM | Sat: Closed | Sun: Closed" → "Mon–Fri: 8 AM–5 PM" (only open days are listed; lunch breaks stay). */
+export function dropClosedDays(h: string) {
+  const DAY = "(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*\\.?";
+  const dayClosed = new RegExp(`^\\s*${DAY}(?:\\s*(?:[–—-]|to|&|and|,)\\s*${DAY})*\\s*:?\\s*closed\\.?\\s*$`, "i");
+  const closedDay = new RegExp(`^\\s*closed\\b[^|]*\\b${DAY}`, "i");
+  const parts = h.split(/\s*\|\s*/);
+  const kept = parts.filter((p) => !dayClosed.test(p) && !closedDay.test(p));
+  return kept.length && kept.length < parts.length ? kept.join(" | ") : h;
+}
+
 export const splitLinesKeep = (s: string) => s.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
 export const joinNote = (a: string, b: string) => (a.includes(b) ? a : [a, b].filter(Boolean).join("\n"));
 
@@ -364,7 +375,7 @@ export function sheetRows(c: Collection): string[][] {
   const push = (label: string, f: CField | { value: string; note: string }) => rows.push([label, f.value, f.note, ""]);
   const tail = () => {
     rows.push(["", "I will send a new prompt", "", ""]);
-    for (const k of ["template", "date", "jiraUrl", "editorUrl"] as FieldKey[]) push(FIELDS.find((f) => f.key === k)!.label, v(k));
+    for (const k of ["template", "date", "jiraUrl", "editorUrl", "reviews"] as FieldKey[]) push(FIELDS.find((f) => f.key === k)!.label, v(k));
   };
   if (!c.locations.length) {
     for (const f of FIELDS) { if (f.key === "template") break; push(f.label, v(f.key)); }

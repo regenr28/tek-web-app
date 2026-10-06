@@ -102,6 +102,8 @@ export async function searchAvailable() {
 export type Place = {
   title: string; address: string; phone: string; website: string; rating: number | null; reviews: number | null;
   placeId: string; cid: string; type: string; hours: Record<string, string>; source: string;
+  /** Google "feature id" 0x…:0x… (needed by some review APIs) */
+  fid?: string;
 };
 
 const cidFromDataId = (dataId: string) => { const h = dataId.match(/:0x([0-9a-f]+)/i)?.[1]; return h ? BigInt("0x" + h).toString() : ""; };
@@ -133,7 +135,7 @@ export async function mapsSearch(query: string, only?: SearchProviderId): Promis
           title: String(x.name || ""), address: String(x.full_address || x.address || ""), phone: String(x.phone_number || ""), website: String(x.website || ""),
           rating: num(x.rating), reviews: num(x.review_count), placeId: String(x.place_id || ""),
           cid: String(x.cid || "") || cidFromDataId(String(x.google_id || "")), type: String(x.type || (Array.isArray(x.subtypes) ? x.subtypes.join(", ") : "")),
-          hours: hoursMap(x.working_hours), source: "OpenWeb Ninja",
+          hours: hoursMap(x.working_hours), source: "OpenWeb Ninja", fid: String(x.google_id || x.business_id || ""),
         }));
       } else if (p.id === "serpapi") {
         const j = await getJ(`https://serpapi.com/search.json?engine=google_maps&type=search&hl=en&gl=us&q=${encodeURIComponent(query)}&api_key=${encodeURIComponent(p.key)}`);
@@ -142,7 +144,7 @@ export async function mapsSearch(query: string, only?: SearchProviderId): Promis
           title: String(x.title || ""), address: String(x.address || ""), phone: String(x.phone || ""), website: String(x.website || ""),
           rating: typeof x.rating === "number" ? x.rating : null, reviews: typeof x.reviews === "number" ? x.reviews : null,
           placeId: String(x.place_id || ""), cid: String(x.data_cid || "") || cidFromDataId(String(x.data_id || "")),
-          type: String(x.type || (Array.isArray(x.types) ? x.types.join(", ") : "")), hours: hoursMap(x.operating_hours || (x.hours as unknown)), source: "SerpApi",
+          type: String(x.type || (Array.isArray(x.types) ? x.types.join(", ") : "")), hours: hoursMap(x.operating_hours || (x.hours as unknown)), source: "SerpApi", fid: String(x.data_id || ""),
         }));
       } else if (p.id === "apify") {
         // Google Maps Scraper actor, run synchronously (one search, no reviews/images, to keep it quick and cheap)
@@ -154,7 +156,7 @@ export async function mapsSearch(query: string, only?: SearchProviderId): Promis
           title: String(x.title || ""), address: String(x.address || ""), phone: String(x.phone || x.phoneUnformatted || ""), website: String(x.website || ""),
           rating: num(x.totalScore), reviews: num(x.reviewsCount), placeId: String(x.placeId || ""),
           cid: String(x.cid || "") || cidFromDataId(String(x.fid || "")), type: String(x.categoryName || (Array.isArray(x.categories) ? x.categories.join(", ") : "")),
-          hours: hoursMap(x.openingHours), source: "Apify",
+          hours: hoursMap(x.openingHours), source: "Apify", fid: String(x.fid || ""),
         }));
       } else if (p.id === "hasdata") {
         const j = await getJ(`https://api.hasdata.com/scrape/google-maps/search?q=${encodeURIComponent(query)}&gl=us&hl=en`, { "x-api-key": p.key }, undefined, 40000);
@@ -163,7 +165,7 @@ export async function mapsSearch(query: string, only?: SearchProviderId): Promis
           title: String(x.title || ""), address: String(x.address || ""), phone: String(x.phone || ""), website: String(x.website || ""),
           rating: num(x.rating), reviews: num(x.reviews), placeId: String(x.placeId || ""),
           cid: String(x.cid || "") || cidFromDataId(String(x.dataId || x.data_id || "")), type: String(x.type || ""),
-          hours: hoursMap(x.workingHours?.days || x.workingHours), source: "HasData",
+          hours: hoursMap(x.workingHours?.days || x.workingHours), source: "HasData", fid: String(x.dataId || x.data_id || ""),
         }));
       } else if (p.id === "serper") {
         const j = await getJ("https://google.serper.dev/maps", { "X-API-KEY": p.key }, { q: query, gl: "us", hl: "en" });
@@ -171,7 +173,7 @@ export async function mapsSearch(query: string, only?: SearchProviderId): Promis
           title: String(x.title || ""), address: String(x.address || ""), phone: String(x.phoneNumber || ""), website: String(x.website || ""),
           rating: typeof x.rating === "number" ? x.rating : null, reviews: typeof x.ratingCount === "number" ? x.ratingCount : null,
           placeId: String(x.placeId || ""), cid: String(x.cid || ""), type: String(x.type || (Array.isArray(x.types) ? x.types.join(", ") : "")),
-          hours: hoursMap(x.openingHours), source: "Serper",
+          hours: hoursMap(x.openingHours), source: "Serper", fid: String(x.fid || x.dataId || ""),
         }));
       }
       await countUse(p.id);
@@ -185,6 +187,70 @@ export async function mapsSearch(query: string, only?: SearchProviderId): Promis
 }
 
 const restMs = (e: unknown) => ((e as { status?: number }).status === 429 || (e as { status?: number }).status === 402 || /limit|credit|quota|run out|exceed|insufficient|usage/i.test((e as Error).message) ? 3_600_000 : 30_000);
+
+// ---------- GBP reviews ----------
+
+export type Review = { text: string; rating: number; author: string; date: string };
+
+const str = (v: unknown): string => (typeof v === "string" ? v : v && typeof v === "object" && typeof (v as { original?: unknown }).original === "string" ? String((v as { original: string }).original) : "");
+function toReviews(list: unknown): Review[] {
+  if (!Array.isArray(list)) return [];
+  return list.map((x: any) => ({
+    text: str(x?.extracted_snippet?.original) || str(x?.snippet) || str(x?.text) || str(x?.review_text) || str(x?.textTranslated) || str(x?.content) || str(x?.body),
+    rating: Number(x?.rating ?? x?.stars ?? x?.review_rating ?? x?.score ?? 0) || 0,
+    author: str(x?.user?.name) || str(x?.author_name) || str(x?.name) || str(x?.author) || str(x?.reviewer?.name),
+    date: str(x?.iso_date) || str(x?.date) || str(x?.review_datetime_utc) || str(x?.publishedAtDate) || str(x?.isoDate),
+  })).filter((r) => r.text.trim().length > 0);
+}
+
+/** Pulls the most relevant Google reviews for one listing (1–2 searches). Tries the Maps providers in order. */
+export async function placeReviews(ids: { placeId?: string; cid?: string; fid?: string }): Promise<{ reviews: Review[]; provider: string }> {
+  const errors: string[] = [];
+  const { placeId = "", cid = "", fid = "" } = ids;
+  for (const p of await providers("maps")) {
+    try {
+      let reviews: Review[] = [];
+      if (p.id === "openwebninja") {
+        const bid = fid || placeId; if (!bid) continue;
+        const j = await getJ(`https://api.openwebninja.com/local-business-data/business-reviews?business_id=${encodeURIComponent(bid)}&limit=40&sort_by=most_relevant&region=us&language=en`, { "x-api-key": p.key });
+        const d = j.data;
+        reviews = toReviews(Array.isArray(d) ? (d[0]?.reviews ?? d) : d?.reviews);
+      } else if (p.id === "serpapi") {
+        if (!placeId && !fid) continue;
+        const base = `https://serpapi.com/search.json?engine=google_maps_reviews&hl=en&sort_by=qualityScore&${placeId ? `place_id=${encodeURIComponent(placeId)}` : `data_id=${encodeURIComponent(fid)}`}&api_key=${encodeURIComponent(p.key)}`;
+        const j = await getJ(base);
+        reviews = toReviews(j.reviews);
+        if (j.serpapi_pagination?.next_page_token && reviews.length < 20) {
+          const j2 = await getJ(`${base}&num=20&next_page_token=${encodeURIComponent(j.serpapi_pagination.next_page_token)}`).catch(() => null);
+          if (j2) { reviews.push(...toReviews(j2.reviews)); await countUse(p.id); }
+        }
+      } else if (p.id === "apify") {
+        const url = placeId ? `https://www.google.com/maps/place/?q=place_id:${placeId}` : cid ? `https://maps.google.com/?cid=${cid}` : "";
+        if (!url) continue;
+        const j = await getJ("https://api.apify.com/v2/acts/compass~crawler-google-places/run-sync-get-dataset-items?timeout=150&format=json",
+          { Authorization: `Bearer ${p.key}` },
+          { startUrls: [{ url }], maxCrawledPlacesPerSearch: 1, maxReviews: 40, reviewsSort: "mostRelevant", language: "en", maxImages: 0, scrapeReviewsPersonalData: true },
+          170_000);
+        reviews = toReviews(Array.isArray(j) ? j[0]?.reviews : []);
+      } else if (p.id === "hasdata") {
+        if (!placeId && !fid) continue;
+        const j = await getJ(`https://api.hasdata.com/scrape/google-maps/reviews?${placeId ? `placeId=${encodeURIComponent(placeId)}` : `dataId=${encodeURIComponent(fid)}`}&sortBy=qualityScore&hl=en`, { "x-api-key": p.key }, undefined, 40000);
+        reviews = toReviews(j.reviews);
+      } else if (p.id === "serper") {
+        if (!fid && !cid && !placeId) continue;
+        const j = await getJ("https://google.serper.dev/reviews", { "X-API-KEY": p.key }, { ...(fid ? { fid } : {}), ...(cid ? { cid } : {}), ...(placeId ? { placeId } : {}), sortBy: "mostRelevant", gl: "us", hl: "en" });
+        reviews = toReviews(j.reviews);
+      }
+      await countUse(p.id);
+      if (reviews.length) return { reviews, provider: SEARCH_INFO[p.id].label };
+      errors.push(`${SEARCH_INFO[p.id].label}: no reviews returned`);
+    } catch (e) {
+      errors.push(`${SEARCH_INFO[p.id].label}: ${(e as Error).message}`);
+      cooling.set(p.id, Date.now() + restMs(e));
+    }
+  }
+  throw new Error(errors.length ? errors.join(" · ") : "No Maps key that can read reviews — add OpenWeb Ninja, SerpApi, Apify, HasData or Serper in Settings → Research.");
+}
 
 // ---------- Web search ----------
 

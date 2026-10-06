@@ -126,8 +126,8 @@ export function selfBase(req: Request) {
   return new URL(req.url).origin;
 }
 
-export function makeHandOff(base: string) {
+export function makeHandOff(base: string, path = "/api/jobs/{id}/continue") {
   return async (jobId: number, token: string) => {
-    await fetch(`${base}/api/jobs/${jobId}/continue`, { method: "POST", headers: { Origin: base, "Content-Type": "application/json", "x-job-token": token }, body: "{}", signal: AbortSignal.timeout(10_000) });
+    await fetch(`${base}${path.replace("{id}", String(jobId))}`, { method: "POST", headers: { Origin: base, "Content-Type": "application/json", "x-job-token": token }, body: "{}", signal: AbortSignal.timeout(10_000) });
   };
 }

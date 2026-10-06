@@ -124,3 +124,17 @@ npm install
 cp .env.example .env.local   # leave TURSO_* blank to use ./local.db
 npm run dev
 ```
+
+## All Websites (domain health monitoring)
+
+Top menu → **All Websites**. Import Duda's **Sites → Export site list** CSV; Site Aliases already in the list are never added twice
+(tick "Also update the details…" to refresh status / publish dates / labels of existing ones). Sites missing from the latest
+export are flagged "Not in the latest import".
+
+Each domain gets one health status — Live on Duda · Redirects to another domain · Moved off Duda (WordPress, Wix…) ·
+Different website (new owner?) · Parked / for sale / expired · 404 · Server error · Domain not resolving · SSL problem · Down —
+plus warnings: domain registration expiring / on hold (RDAP), SSL expiring, slow, Duda serving a different site alias, staging address.
+
+- **Check all domains** runs on the server in the background (≈15–30 min for ~2,000 sites); **Check now** checks one site.
+- **Automatic check** (weekly by default) uses Vercel Cron (`vercel.json`) — set `CRON_SECRET` in Vercel to enable it.
+- **Export report** downloads the rows currently shown (filters applied) as CSV.

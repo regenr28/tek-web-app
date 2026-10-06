@@ -11,6 +11,7 @@ export default function TopBar({ me, limited }: { me: { name: string; role: stri
       <Link href="/" className="brand"><span className="brand-dot" /> <span>Duda Preview Audit</span></Link>
       <nav>
         {!limited && <Link href="/" className={path === "/" ? "active" : ""}>Projects</Link>}
+        {!limited && <Link href="/websites" className={path.startsWith("/websites") ? "active" : ""}>All Websites</Link>}
         {!limited && <Link href="/settings" className={path.startsWith("/settings") ? "active" : ""}>Settings</Link>}
         <Link href="/account" className={path.startsWith("/account") ? "active" : ""}>My account</Link>
       </nav>

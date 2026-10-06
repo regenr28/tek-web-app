@@ -135,6 +135,45 @@ const SCHEMA = [
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   )`,
   `CREATE INDEX IF NOT EXISTS jobs_site ON jobs(site_id, id)`,
+  // All Websites (imported from Duda's site list export) + domain health monitoring
+  `CREATE TABLE IF NOT EXISTS websites (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    alias TEXT NOT NULL UNIQUE,
+    site_name TEXT NOT NULL DEFAULT '',
+    external_uid TEXT,
+    domain TEXT NOT NULL DEFAULT '',
+    duda_status TEXT NOT NULL DEFAULT '',
+    created_at TEXT, first_publish TEXT, last_publish TEXT,
+    auto_renew TEXT, next_renewal TEXT, subscription TEXT, billing_failed INTEGER NOT NULL DEFAULT 0,
+    labels TEXT NOT NULL DEFAULT '',
+    imported_at TEXT NOT NULL DEFAULT (datetime('now')),
+    refreshed_at TEXT,
+    last_seen_import INTEGER NOT NULL DEFAULT 0,
+    health TEXT NOT NULL DEFAULT 'unchecked',
+    health_detail TEXT NOT NULL DEFAULT '',
+    health_flags TEXT NOT NULL DEFAULT '[]',
+    health_json TEXT,
+    checked_at TEXT,
+    prev_health TEXT,
+    health_changed_at TEXT,
+    rdap_checked_at TEXT,
+    domain_expires TEXT,
+    ssl_expires TEXT
+  )`,
+  `CREATE INDEX IF NOT EXISTS websites_health ON websites(health)`,
+  `CREATE TABLE IF NOT EXISTS health_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    status TEXT NOT NULL DEFAULT 'queued',
+    scope TEXT NOT NULL DEFAULT 'published',
+    total INTEGER NOT NULL DEFAULT 0,
+    done INTEGER NOT NULL DEFAULT 0,
+    cursor_id INTEGER NOT NULL DEFAULT 0,
+    started_by TEXT,
+    started_at TEXT NOT NULL DEFAULT (datetime('now')),
+    finished_at TEXT,
+    token_hash TEXT NOT NULL,
+    lease_until INTEGER NOT NULL DEFAULT 0
+  )`,
 ];
 
 // Columns added after the first release. Each is applied once if missing.

@@ -33,7 +33,7 @@ export function isBlockedIp(ip: string) {
 }
 
 type LookupCb = (err: NodeJS.ErrnoException | null, address: string | dns.LookupAddress[], family?: number) => void;
-function safeLookup(hostname: string, options: dns.LookupOptions, cb: LookupCb) {
+export function safeLookup(hostname: string, options: dns.LookupOptions, cb: LookupCb) {
   dns.lookup(hostname, { ...options, all: true, order: "ipv4first" }, (err, addrs) => {
     if (err) return cb(err, "");
     const list = addrs as dns.LookupAddress[];
@@ -56,6 +56,8 @@ export type SafeOpts = {
   maxBytes?: number;
   maxRedirects?: number;
   httpsOnly?: boolean;
+  /** called for every redirect hop (status, from, to) — used by the domain health check */
+  onRedirect?: (status: number, from: string, to: string) => void;
 };
 
 export type SafeResponse = { status: number; url: string; headers: Headers; body: Buffer; text: () => string };
@@ -84,7 +86,9 @@ export async function safeFetch(rawUrl: string, o: SafeOpts): Promise<SafeRespon
         const loc = res.headers.get("location");
         await res.body?.cancel();
         if (!loc || hop >= (o.maxRedirects ?? 5)) throw new HttpError(502, "Too many redirects");
-        url = checkUrl(new URL(loc, url).toString(), o);
+        const next = checkUrl(new URL(loc, url).toString(), o);
+        o.onRedirect?.(res.status, url.toString(), next.toString());
+        url = next;
         continue;
       }
       const declared = Number(res.headers.get("content-length") || 0);

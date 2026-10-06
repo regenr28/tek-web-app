@@ -24,13 +24,18 @@ export type Evidence = {
   search?: { queries: string[]; provider: string; results: WebResult[]; at: string };
   reviews?: { key: string; provider: string; all: Review[]; at: string };
   years?: { established: string; experience: string; quote: string; url: string; via: string; at: string };
+  crosscheck?: CrossCheck;
 };
 
-export type StepId = "gbp" | "website" | "search" | "ai" | "review";
+export type ListingRow = { source: string; url: string; name: string; phone: string; address: string; website: string; read: "data" | "page" | "ai" | "search" | "none"; marks: { name?: string; phone?: string; address?: string; website?: string } };
+export type CrossCheck = { at: string; rows: ListingRow[]; issues: string[] };
+
+export type StepId = "gbp" | "website" | "search" | "check" | "ai" | "review";
 export const STEPS: { id: StepId; label: string }[] = [
   { id: "gbp", label: "Google Business Profile" },
   { id: "website", label: "Existing website" },
   { id: "search", label: "Web & social search" },
+  { id: "check", label: "Cross-check listings" },
   { id: "ai", label: "AI fill & format" },
   { id: "review", label: "AI review" },
 ];
@@ -51,6 +56,22 @@ export function nameSimilarity(a: string, b: string) {
   const inter = [...x].filter((t) => y.has(t)).length;
   return inter / Math.max(x.size, y.size);
 }
+const LEGAL = /\b(l\.?l\.?c|inc|incorporated|corp|corporation|co|ltd|pllc|llp|lp)\b\.?/gi;
+const nameKey = (x: string) => x.toLowerCase().replace(/&/g, " and ").replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
+/** How another listing's name compares with the Jira name. */
+export function compareNames(jira: string, other: string): "same" | "legal" | "minor" | "different" {
+  if (!other.trim() || nameKey(jira) === nameKey(other)) return "same";
+  const strip = (x: string) => nameKey(x.replace(LEGAL, " "));
+  if (strip(jira) === strip(other)) return "legal";
+  return nameSimilarity(jira, other) >= 0.75 ? "minor" : "different";
+}
+export function nameDiffNote(jira: string, other: string, where: string) {
+  const k = compareNames(jira, other);
+  if (k === "same") return "";
+  if (k === "legal") { const suf = (other.match(LEGAL) || []).map((x) => x.toUpperCase().replace(/\./g, "")).join(", ") || "a legal suffix"; return `${where} name is "${other}" (adds ${suf}) — kept the Jira name "${jira}". Use the ${where} name where the legal name is needed (e.g. footer/copyright).`; }
+  return `${where} name is "${other}" — different from the Jira name "${jira}" (kept Jira). Confirm which name the client wants on the website.`;
+}
+
 const digits = (s: string) => s.replace(/\D/g, "").replace(/^1(?=\d{10}$)/, "");
 const now = () => new Date().toISOString();
 
@@ -192,8 +213,9 @@ async function stepGbpSingle(c: Collection, ev: Evidence): Promise<string> {
 export function applyGbpPlace(c: Collection, place: Place) {
   const name = c.fields.shopName.value, jiraAddr = c.fields.address.value;
   // Name — Jira is the fact; just note a mismatch
-  const sim = place.title ? nameSimilarity(name, place.title) : 1;
-  if (sim < 1) patch(c, "shopName", { note: `GBP name is "${place.title}" — kept the Jira name (fact).`, source: "jira", status: sim >= 0.5 ? "ok" : "review" });
+  c.fields.shopName.note = c.fields.shopName.note.split("\n").filter((l) => !/^GBP name is /.test(l)).join("\n");
+  const diff = place.title ? nameDiffNote(name, place.title, "GBP") : "";
+  if (diff) patch(c, "shopName", { note: diff, source: "jira", status: "review" });
   else patch(c, "shopName", { status: "ok", source: "jira" });
   c.fields.shopName.note = c.fields.shopName.note.replace("Verify it matches the Google Business Profile name.", "").trim();
 
@@ -281,7 +303,7 @@ async function stepGbpLocations(c: Collection, ev: Evidence): Promise<string> {
 function applyGbpToLocation(c: Collection, i: number, place: Place) {
   const L = c.locations[i], lf = L.fields;
   if (place.title) patchField(lf.gbpName, { value: place.title, source: "gbp", force: true, status: "ok",
-    note: nameSimilarity(c.fields.shopName.value, place.title) < 1 ? `Differs from the Jira shop name "${c.fields.shopName.value}" — the GBP name is only for this location's listing.` : "" });
+    note: compareNames(c.fields.shopName.value, place.title) !== "same" ? `Differs from the Jira shop name "${c.fields.shopName.value}"${compareNames(c.fields.shopName.value, place.title) === "legal" ? " (legal suffix only)" : ""} — the GBP name is only for this location's listing.` : "" });
   lf.gbpName.note = lf.gbpName.note.replace("Filled from the Google Business Profile during research.", "").trim();
   const gAddr = stripCountry(place.address);
   const hasStreet = /^\d+\s/.test(gAddr);
@@ -907,6 +929,146 @@ export async function stepSearch(c: Collection, ev: Evidence): Promise<string> {
   const yrs = await findYears(c, ev, results, relevant).catch(() => "");
   tidySocials(c);
   return `${results.length} results via ${provider}; ${socials.length} social profile(s) confirmed${rejected.length ? `, ${rejected.length} not added (couldn't confirm)` : ""}${yrs ? `; ${yrs}` : ""}`;
+}
+
+// ---------- 4. Cross-check every listing (GBP, website, Facebook, Yelp, …) ----------
+
+const PHONE_RE = /(?:\+?1[\s.-]?)?\(?\b([2-9]\d{2})\)?[\s.-]?(\d{3})[\s.-]?(\d{4})\b/g;
+const ADDR_RE = /\b\d{2,6}\s+[A-Za-z0-9 .'-]{3,60}?,?\s+[A-Za-z .'-]{2,40},?\s+[A-Z]{2}\s+\d{5}\b/;
+/** The "123 Street, City, ST 12345" in a text (so "Highway 16 Auto Repair. 1713 N NC 16 …" gives the real street, not "16 Auto…"). */
+function findAddress(text: string): string {
+  const sticky = new RegExp(ADDR_RE.source.replace(/^\\b/, ""), "y");
+  let best = "";
+  for (const m of text.matchAll(/\b\d{2,6}\s/g)) {
+    sticky.lastIndex = m.index!;
+    const hit = sticky.exec(text)?.[0];
+    // skip matches that run across a sentence ("…Auto Repair. 1713 …"); keep the fullest street otherwise
+    if (hit && !/[a-z]{3,}[.!?]\s+(?=[A-Z0-9])/.test(hit) && hit.length > best.length) best = hit;
+  }
+  return best;
+}
+const fmtPhone = (d: string) => (d.length === 10 ? `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}` : d);
+
+/** Name / phone / address / website a page states (structured data first, then the page text). */
+function readListing(html: string): { name: string; phone: string; address: string; website: string } {
+  const $ = cheerio.load(html);
+  let name = "", phone = "", address = "", website = "";
+  $("script[type='application/ld+json']").each((_, el) => {
+    try {
+      const items = ([] as unknown[]).concat(JSON.parse($(el).text())).flatMap((x: any) => (x?.["@graph"] ? x["@graph"] : [x]));
+      for (const x of items as any[]) {
+        if (!x || typeof x !== "object") continue;
+        if (!name && typeof x.name === "string" && /business|store|repair|auto|organization|place/i.test(String(x["@type"]))) name = x.name;
+        if (!phone && typeof x.telephone === "string") phone = x.telephone;
+        const a = x.address;
+        if (!address && a && typeof a === "object") address = [a.streetAddress, a.addressLocality, [a.addressRegion, a.postalCode].filter(Boolean).join(" ")].filter(Boolean).join(", ");
+        if (!website && typeof x.url === "string" && !/facebook|yelp|instagram/i.test(x.url)) website = x.url;
+      }
+    } catch { /* ignore */ }
+  });
+  const og = $('meta[property="og:title"]').attr("content") || $("title").first().text();
+  if (!name) name = og.split(/\s[|–-]\s/)[0].trim();
+  const text = [$('meta[name="description"]').attr("content") || "", $('meta[property="og:description"]').attr("content") || "", $("body").text()].join(" ").replace(/\s+/g, " ");
+  if (!phone) { const m = [...text.matchAll(PHONE_RE)][0]; if (m) phone = fmtPhone(m[1] + m[2] + m[3]); }
+  if (!address) address = findAddress(text);
+  return { name: name.slice(0, 120), phone, address: address.slice(0, 160), website };
+}
+
+export async function stepCrossCheck(c: Collection, ev: Evidence, jiraRaw: Record<string, string>): Promise<string> {
+  const jName = c.fields.shopName.value;
+  const jPhone = digits(jiraRaw.phone || c.fields.phone.value);
+  const locs = locInfos(c);
+  const jAddr = jiraRaw.address || locs[0]?.address || "";
+  const myDomain = domainOf(websiteUrl(c.fields.domain.value || c.fields.existingWebsite.value || "") || "").replace(/^www\./, "");
+  const rows: ListingRow[] = [];
+  const empty = { name: "", phone: "", address: "", website: "" };
+
+  rows.push({ source: "Jira (client form)", url: "", name: jName, phone: jiraRaw.phone || c.fields.phone.value, address: jAddr, website: jiraRaw.website || jiraRaw.domain || "", read: "data", marks: {} });
+  const gbps = c.locations.length ? (ev.gbpLocs || []).map((g, i) => ({ g: g?.place, label: `GBP — ${c.locations[i]?.city || `location ${i + 1}`}` })) : [{ g: ev.gbp?.place, label: "Google Business Profile" }];
+  for (const { g, label } of gbps) if (g) rows.push({ source: label, url: g.cid ? `https://www.google.com/maps?cid=${g.cid}` : "", name: g.title, phone: g.phone, address: stripCountry(g.address), website: g.website, read: "data", marks: {} });
+  if (ev.website?.pages?.length) {
+    const t = ev.website.pages.map((p) => p.text).join(" ");
+    const m = [...t.matchAll(PHONE_RE)].map((x) => x[1] + x[2] + x[3]);
+    rows.push({ source: "Their website", url: ev.website.finalUrl, name: String((ev.website.signals as { title?: string }).title || "").split(/\s[|–-]\s/)[0], phone: m.includes(jPhone) ? fmtPhone(jPhone) : m[0] ? fmtPhone(m[0]) : "", address: findAddress(t), website: ev.website.finalUrl, read: "page", marks: {} });
+  }
+
+  // every social / listing link we kept
+  const links = uniqLines([...splitLinesKeep(c.fields.socials.value), ...c.locations.flatMap((L) => splitLinesKeep(L.fields.socials.value))]).filter((u) => profileOf(u));
+  const toAi: ListingRow[] = [];
+  await Promise.all(links.map(async (u) => {
+    const pf = profileOf(u)!;
+    const row: ListingRow = { source: pf.platform, url: pf.clean, ...empty, read: "none", marks: {} };
+    rows.push(row);
+    const sr = (ev.search?.results || []).find((r) => profileOf(r.url)?.key === pf.key);
+    try {
+      const r = await safeFetch(pf.clean, { hosts: "public", headers: { "User-Agent": UA, Accept: "text/html", "Accept-Language": "en-US" }, timeoutMs: 12000, maxBytes: 3_000_000 });
+      if (r.status < 400) { const got = readListing(r.text()); if (got.phone || got.address) { Object.assign(row, got, { read: "page" }); return; } }
+    } catch { /* blocked */ }
+    if (sr) {
+      const text = `${sr.title} ${sr.snippet}`;
+      const ph = [...text.matchAll(PHONE_RE)][0];
+      Object.assign(row, { name: sr.title.split(/\s[|–-]\s/)[0].replace(/\s*-\s*(updated|yelp).*$/i, "").trim(), phone: ph ? fmtPhone(ph[1] + ph[2] + ph[3]) : "", address: findAddress(text), read: "search" });
+    }
+    if (!row.phone && !row.address) toAi.push(row);
+  }));
+  if (toAi.length) {
+    try {
+      const text = await groqBrowserSearch(`Open each of these pages and copy exactly what it shows for the business: its name, phone number, street address, website and opening hours.
+Pages:\n${toAi.map((r) => `- ${r.url}`).join("\n")}
+If a page can't be opened (login wall), set "opened": false. Never guess.
+Return ONLY JSON: {"pages":[{"url":"","opened":true,"name":"","phone":"","address":"","website":""}]}`);
+      const j = parseJson<{ pages?: { url: string; opened?: boolean; name?: string; phone?: string; address?: string; website?: string }[] }>(text);
+      for (const pg of j?.pages || []) {
+        const row = toAi.find((r) => profileOf(r.url)?.key === profileOf(pg.url || "")?.key);
+        if (!row || pg.opened === false || !(pg.name || pg.phone || pg.address)) continue;
+        Object.assign(row, { name: pg.name || row.name, phone: pg.phone || row.phone, address: pg.address || row.address, website: pg.website || row.website, read: "ai" });
+      }
+    } catch { /* no Groq */ }
+  }
+
+  // compare everything with Jira
+  const issues: string[] = [];
+  const num = (a: string) => a.match(/^\s*(\d+)/)?.[1] || "";
+  const zip = (a: string) => a.match(/\b(\d{5})(?:-\d{4})?\b(?!.*\b\d{5}\b)/)?.[1] || "";
+  const jNum = num(jAddr), jZip = zip(jAddr);
+  for (const r of rows.slice(1)) {
+    if (r.name) {
+      const k = compareNames(jName, r.name);
+      r.marks.name = k === "same" ? "ok" : k === "legal" ? "legal" : k === "minor" ? "minor" : "diff";
+      if (k !== "same" && r.read !== "none") issues.push(`Name — ${r.source} shows "${r.name}"${k === "legal" ? " (legal suffix only)" : ""}${r.url ? ` (${r.url})` : ""}`);
+    }
+    if (r.phone) {
+      const d = digits(r.phone);
+      const any = c.locations.length ? c.locations.some((L) => digits(L.fields.phone.value) === d) : d === jPhone;
+      r.marks.phone = any ? "ok" : "diff";
+      if (!any) issues.push(`Phone — ${r.source} shows ${r.phone}, Jira has ${fmtPhone(jPhone)}${r.url ? ` (${r.url})` : ""}`);
+    }
+    if (r.address) {
+      const okAddr = c.locations.length ? c.locations.some((L) => num(L.fields.address.value) === num(r.address) && (!zip(r.address) || zip(L.fields.address.value) === zip(r.address)))
+        : (!jNum || num(r.address) === jNum) && (!jZip || !zip(r.address) || zip(r.address) === jZip);
+      r.marks.address = okAddr ? "ok" : "diff";
+      if (!okAddr) issues.push(`Address — ${r.source} shows "${r.address}", Jira has "${jAddr}"${r.url ? ` (${r.url})` : ""}`);
+    }
+    if (r.website && myDomain && !/facebook|yelp|instagram|google/i.test(r.website)) {
+      const d = domainOf(websiteUrl(r.website) || r.website).replace(/^www\./, "");
+      r.marks.website = d === myDomain ? "ok" : "diff";
+      if (d !== myDomain) issues.push(`Website — ${r.source} links to ${d}, the project uses ${myDomain}`);
+    }
+  }
+  ev.crosscheck = { at: now(), rows, issues };
+
+  // put each discrepancy on the field it affects
+  const put = (k: FieldKey, prefix: string, lines: string[]) => {
+    const f = c.fields[k];
+    f.note = f.note.split("\n").filter((l) => !l.startsWith(prefix)).join("\n").trim();
+    if (lines.length) patch(c, k, { note: `${prefix} ${lines.join(" · ")}`, source: f.source || "search", status: "review" });
+  };
+  const by = (t: string) => issues.filter((i) => i.startsWith(t)).map((i) => i.replace(/^[A-Za-z]+ — /, ""));
+  put("shopName", "Other listings:", by("Name").filter((x) => !/^Google Business Profile|^GBP/.test(x)));
+  if (!c.locations.length) { put("phone", "Listings differ:", by("Phone")); put("address", "Listings differ:", by("Address")); }
+  put("existingWebsite", "Listings link elsewhere:", by("Website"));
+  const unread = rows.filter((r) => r.read === "none").map((r) => r.source);
+  return `${rows.length - 1} listing(s) compared · ${issues.length ? `${issues.length} difference(s)` : "no differences"}${unread.length ? ` · couldn't read ${unread.join(", ")} (open them yourself)` : ""}`;
 }
 
 // ---------- 4. AI fill & format ----------

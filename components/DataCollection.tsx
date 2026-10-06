@@ -8,6 +8,8 @@ type Loc = { city: string; state: string; tekmetricId: string; fields: Record<st
 type Collection = { fields: Record<string, CField>; locations: Loc[]; pages: string[]; minServices: number; minAmenities: number; research: Record<string, { at: string; ok: boolean; summary: string }> };
 type Project = { key: string; url: string; typeLabel: string; type: string | null; template: string; templateNumber: string; pages: string[]; previewUrl: string; tekmetricId: string; created: string; activity: { type: string; author: string; date: string; details: string }[] };
 type GbpEv = { provider: string; title?: string; address?: string; rating?: number | null; reviews?: number | null; hours?: Record<string, string>; at: string };
+type Mark = "ok" | "legal" | "minor" | "diff" | undefined;
+type CrossCheckEv = { at: string; issues: string[]; rows: { source: string; url: string; name: string; phone: string; address: string; website: string; read: string; marks: { name?: Mark; phone?: Mark; address?: Mark; website?: Mark } }[] };
 type Data = {
   collection: Collection; labels: { key: string; label: string }[]; locLabels: { key: string; label: string }[];
   tsv: string; text: string; rows: string[][]; project: Project | null;
@@ -16,6 +18,7 @@ type Data = {
     gbp: GbpEv | null; gbpLocs: (GbpEv | null)[];
     website: { url: string; pages: { url: string; title: string }[]; signals: Record<string, unknown>; at: string } | null;
     search: { provider: string; queries: string[]; results: { title: string; url: string }[]; at: string } | null;
+    crosscheck: CrossCheckEv | null;
   };
   available: { web: boolean; maps: boolean; ai: boolean };
 };
@@ -200,6 +203,8 @@ export default function DataCollection({ siteId, onChanged }: { siteId: number; 
         </>
       )}
 
+      {d.evidence.crosscheck && <CrossCheckCard x={d.evidence.crosscheck} />}
+
       <ReviewsCard f={c.fields.reviews} onSave={(p) => saveField("reviews", p)} copy={copy} copied={copied} />
 
       <div className="grid2">
@@ -241,6 +246,36 @@ function sheetCopy(e: React.ClipboardEvent<HTMLTableElement>, rows: string[][]) 
   e.clipboardData.setData("text/plain", block.map((r) => r.map(q).join("\t")).join("\n"));
   e.clipboardData.setData("text/html", `<table>${block.map((r) => `<tr>${r.map((x) => `<td>${esc(x)}</td>`).join("")}</tr>`).join("")}</table>`);
   e.preventDefault();
+}
+
+const READ_LABEL: Record<string, string> = { data: "", page: "read from the page", ai: "read by Groq AI — double-check", search: "from the search result", none: "couldn't open — check it yourself" };
+function CrossCheckCard({ x }: { x: CrossCheckEv }) {
+  const cell = (v: string, m: Mark) => !v ? <span className="muted">—</span>
+    : <span style={{ color: m === "diff" ? "var(--error)" : m === "legal" || m === "minor" ? "var(--warning)" : undefined }}>{m === "ok" ? "✓ " : m === "diff" ? "✕ " : m ? "≈ " : ""}{v}</span>;
+  return (
+    <div className="card stack" style={{ boxShadow: "none" }}>
+      <div className="row between">
+        <div>
+          <h3 style={{ margin: 0 }}>Cross-check listings</h3>
+          <div className="muted small">Name, phone, address and website on every listing, compared with Jira. ✓ same · ≈ small difference (e.g. “LLC”) · ✕ different. Checked {ago(x.at)}.</div>
+        </div>
+        {x.rows.length < 2 ? <span className="badge">Nothing to compare yet — run GBP and search first</span>
+          : <span className={`badge ${x.issues.length ? "warning" : "ok"}`}>{x.issues.length ? `${x.issues.length} difference(s)` : "All match"}</span>}
+      </div>
+      <div style={{ overflowX: "auto" }}>
+        <table className="t small">
+          <thead><tr><th>Source</th><th>Name</th><th>Phone</th><th>Address</th><th>Website</th></tr></thead>
+          <tbody>{x.rows.map((r, i) => (
+            <tr key={i}>
+              <td><b>{r.url ? <a href={r.url} target="_blank" rel="noreferrer noopener">{r.source}</a> : r.source}</b>{READ_LABEL[r.read] && <div className="muted">{READ_LABEL[r.read]}</div>}</td>
+              <td>{cell(r.name, r.marks.name)}</td><td>{cell(r.phone, r.marks.phone)}</td><td>{cell(r.address, r.marks.address)}</td><td>{cell(r.website, r.marks.website)}</td>
+            </tr>
+          ))}</tbody>
+        </table>
+      </div>
+      {x.issues.length > 0 && <ul className="small" style={{ margin: 0, paddingLeft: 18 }}>{x.issues.map((t, i) => <li key={i}>{t}</li>)}</ul>}
+    </div>
+  );
 }
 
 /** Top 5 GBP reviews — kept apart from the sheet so "Copy for Google Sheet" stays exactly like the original layout. */

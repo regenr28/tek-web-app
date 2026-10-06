@@ -73,8 +73,21 @@ export type WebsiteRow = {
 
 export async function listWebsites(): Promise<WebsiteRow[]> {
   const meta = await importMeta();
-  return all<WebsiteRow>(`SELECT id, alias, site_name, domain, duda_status, created_at, first_publish, last_publish, subscription, labels, health, health_detail, health_flags,
+  const rows = await all<WebsiteRow>(`SELECT id, alias, site_name, domain, duda_status, created_at, first_publish, last_publish, subscription, labels, health, health_detail, health_flags,
     checked_at, health_changed_at, prev_health, domain_expires, ssl_expires, CASE WHEN last_seen_import < ? THEN 1 ELSE 0 END AS missing FROM websites ORDER BY created_at DESC, id DESC`, [meta?.importId || 0]);
+  // expiry warnings follow the stored dates (so a change of threshold applies without re-checking everything)
+  const days = (iso: string | null) => (iso ? (Date.parse(iso) - Date.now()) / 86_400_000 : Infinity);
+  for (const r of rows) {
+    let f: string[] = [];
+    try { f = JSON.parse(r.health_flags || "[]"); } catch { /* ignore */ }
+    f = f.filter((x) => x !== "ssl_expiring" && x !== "domain_expiring");
+    if (r.health !== "skipped" && r.health !== "unchecked") {
+      const sd = days(r.ssl_expires); if (sd < 5 && sd >= 0) f.push("ssl_expiring");
+      if (days(r.domain_expires) < 7) f.push("domain_expiring");
+    }
+    r.health_flags = JSON.stringify(f);
+  }
+  return rows;
 }
 export async function importMeta(): Promise<(ImportResult & { at: string }) | null> {
   const m = await one<{ value: string }>("SELECT value FROM settings WHERE key = 'websites_import'");

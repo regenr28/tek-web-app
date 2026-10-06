@@ -30,9 +30,9 @@ export const HEALTH_ORDER: Health[] = ["ok", "redirect", "moved", "taken", "park
 
 export type Flag = "domain_expiring" | "domain_hold" | "ssl_expiring" | "slow" | "other_duda_site" | "staging_domain";
 export const FLAG_LABEL: Record<Flag, string> = {
-  domain_expiring: "Domain registration expires within 30 days",
+  domain_expiring: "Domain renewal overdue or due within 7 days",
   domain_hold: "Domain is on hold / in redemption / pending delete",
-  ssl_expiring: "SSL certificate expires within 14 days",
+  ssl_expiring: "SSL certificate expires within 5 days (renewal may be failing)",
   slow: "Slow — took over 5 seconds",
   other_duda_site: "Domain shows a different Duda site (another alias)",
   staging_domain: "Still on a staging address (no custom domain)",
@@ -179,7 +179,7 @@ export async function checkWebsite(site: { domain: string; site_name: string; al
   // SSL certificate (only if https is meant to work)
   if (!isStaging(host) && !testHost) {
     info.ssl = await sslInfo(host);
-    if (info.ssl.validTo) { const d = daysUntil(info.ssl.validTo); if (d < 14 && d >= 0) flags.push("ssl_expiring"); }
+    if (info.ssl.validTo) { const d = daysUntil(info.ssl.validTo); if (d < 5 && d >= 0) flags.push("ssl_expiring"); }
   }
   // Domain registration (at most once a week per domain — RDAP servers are shared)
   let domainExpires = site.domain_expires || undefined;
@@ -188,7 +188,8 @@ export async function checkWebsite(site: { domain: string; site_name: string; al
     if (info.rdap.expires) domainExpires = info.rdap.expires;
     if (info.rdap.status?.some((s) => /hold|redemption|pending ?delete/i.test(s))) flags.push("domain_hold");
   }
-  if (domainExpires && daysUntil(domainExpires) < 30) flags.push("domain_expiring");
+  // registrars auto-renew on/near the expiry date, so only a very close or past date is worth a warning
+  if (domainExpires && daysUntil(domainExpires) < 7) flags.push("domain_expiring");
 
   if (!res) {
     const sslBroken = /CERT|SSL|TLS|ALTNAME|self.signed|UNABLE_TO_VERIFY/i.test(httpsErr) || !!info.ssl?.error;

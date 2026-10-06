@@ -18,8 +18,13 @@ const TONE: Record<string, string> = { ok: "ok", redirect: "warning", moved: "wa
 const STAGING = /\.(tekmetric\.site|shopgenie\.site|multiscreensite\.com|dudaone\.com)$/i;
 const day = (iso: string | null) => (iso ? iso.slice(0, 10) : "");
 const PAGE = 50;
-type Filters = { q: string; status: string; health: string; flag: string; labels: string[]; labelMode: "any" | "all"; domainType: string; createdFrom: string; createdTo: string; firstFrom: string; firstTo: string; lastFrom: string; lastTo: string };
-const EMPTY: Filters = { q: "", status: "", health: "", flag: "", labels: [], labelMode: "any", domainType: "", createdFrom: "", createdTo: "", firstFrom: "", firstTo: "", lastFrom: "", lastTo: "" };
+/** Overview groups: one tile each; "unhealthy" and "attention" have a second filter for the specific problem. */
+type Group = "" | "ok" | "unhealthy" | "attention" | "unchecked";
+const UNHEALTHY = ["redirect", "moved", "taken", "parked", "not_found", "error", "dns", "ssl", "down"];
+const WARNINGS = ["domain_expiring", "domain_hold", "ssl_expiring", "slow", "other_duda_site", "changed", "missing"];
+type Filters = { q: string; status: string; group: Group; problem: string; warning: string; labels: string[]; labelMode: "any" | "all"; template: string; domainType: string; createdFrom: string; createdTo: string; firstFrom: string; firstTo: string; lastFrom: string; lastTo: string };
+const EMPTY: Filters = { q: "", status: "", group: "", problem: "", warning: "", labels: [], labelMode: "any", template: "", domainType: "", createdFrom: "", createdTo: "", firstFrom: "", firstTo: "", lastFrom: "", lastTo: "" };
+const isTemplate = (l: string) => /^\d{1,3}$/.test(l);
 
 export default function Websites() {
   const [d, setD] = useState<Data | null>(null);
@@ -52,11 +57,17 @@ export default function Websites() {
     return () => clearInterval(t);
   }, [running, load]);
 
-  const allLabels = useMemo(() => {
+  // labels split in two: plan/type labels (PPW, SL, PRO, Lite, MSO…) and template numbers (01–31)
+  const { tagLabels, templates } = useMemo(() => {
     const c = new Map<string, number>();
     for (const r of d?.rows || []) for (const l of r.labels.split(",").filter(Boolean)) c.set(l, (c.get(l) || 0) + 1);
-    return [...c.entries()].sort((a, b) => (/^\d+$/.test(a[0]) ? 1 : 0) - (/^\d+$/.test(b[0]) ? 1 : 0) || b[1] - a[1] || a[0].localeCompare(b[0]));
+    const all = [...c.entries()];
+    return {
+      tagLabels: all.filter(([l]) => !isTemplate(l)).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])),
+      templates: all.filter(([l]) => isTemplate(l)).sort((a, b) => Number(a[0]) - Number(b[0])),
+    };
   }, [d]);
+  const [moreOpen, setMoreOpen] = useState(false);
 
   // every filter except health/warning (so the tiles show counts for the current selection)
   const base = useMemo(() => (d?.rows || []).filter((r) => {
@@ -65,17 +76,34 @@ export default function Websites() {
     if (f.domainType === "custom" && STAGING.test(r.domain)) return false;
     if (f.domainType === "staging" && !STAGING.test(r.domain)) return false;
     if (f.labels.length) { const ls = r.labels.split(","); if (f.labelMode === "all" ? !f.labels.every((l) => ls.includes(l)) : !f.labels.some((l) => ls.includes(l))) return false; }
+    if (f.template && !r.labels.split(",").some((l) => isTemplate(l) && Number(l) === Number(f.template))) return false;
     const inRange = (v: string | null, from: string, to: string) => (!from || (!!v && day(v) >= from)) && (!to || (!!v && day(v) <= to));
     return inRange(r.created_at, f.createdFrom, f.createdTo) && inRange(r.first_publish, f.firstFrom, f.firstTo) && inRange(r.last_publish, f.lastFrom, f.lastTo);
   }), [d, f]);
   const flagsOf = (r: Row) => { try { return JSON.parse(r.health_flags || "[]") as string[]; } catch { return []; } };
-  const shown = useMemo(() => base.filter((r) => (!f.health || r.health === f.health) && (!f.flag || (f.flag === "missing" ? r.missing : f.flag === "changed" ? !!r.health_changed_at : flagsOf(r).includes(f.flag)))), [base, f.health, f.flag]);
+  /** warnings of a row (incl. "health changed" and "not in latest import"); the staging address is shown by the Domain filter instead */
+  const warningsOf = (r: Row) => [...flagsOf(r).filter((x) => x !== "staging_domain"), ...(r.health_changed_at ? ["changed"] : []), ...(r.missing ? ["missing"] : [])];
+  const groupOf = (r: Row): Group => (r.health === "ok" ? "ok" : UNHEALTHY.includes(r.health) ? "unhealthy" : "unchecked");
+  const shown = useMemo(() => base.filter((r) => {
+    if (f.group === "attention") { const w = warningsOf(r); return w.length > 0 && (!f.warning || w.includes(f.warning)); }
+    if (f.group && groupOf(r) !== f.group) return false;
+    if (f.group === "unhealthy" && f.problem && r.health !== f.problem) return false;
+    return true;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [base, f.group, f.problem, f.warning]);
 
   const counts = useMemo(() => {
-    const h: Record<string, number> = {}, fl: Record<string, number> = {};
-    let changed = 0, missing = 0;
-    for (const r of base) { h[r.health] = (h[r.health] || 0) + 1; for (const x of flagsOf(r)) fl[x] = (fl[x] || 0) + 1; if (r.health_changed_at) changed++; if (r.missing) missing++; }
-    return { h, fl, changed, missing };
+    const h: Record<string, number> = {}, w: Record<string, number> = {};
+    let attention = 0;
+    for (const r of base) {
+      h[r.health] = (h[r.health] || 0) + 1;
+      const ws = warningsOf(r);
+      if (ws.length) attention++;
+      for (const x of ws) w[x] = (w[x] || 0) + 1;
+    }
+    const unhealthy = UNHEALTHY.reduce((n, k) => n + (h[k] || 0), 0);
+    return { h, w, attention, unhealthy, unchecked: (h.unchecked || 0) + (h.skipped || 0) };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [base]);
 
   async function importFile(file: File, refresh: boolean) {
@@ -108,16 +136,17 @@ export default function Websites() {
   if (!d) return <p className="muted">{err || "Loading…"}</p>;
   const L = d.healthLabels;
   const pageRows = shown.slice(page * PAGE, page * PAGE + PAGE);
-  const tile = (key: string, label: string, n: number, tone = "", kind: "health" | "flag" = "health") => {
-    const active = kind === "health" ? f.health === key : f.flag === key;
+  const wLabel = (k: string) => (k === "changed" ? "Health changed since a previous check" : k === "missing" ? "Not in the latest import (deleted in Duda?)" : d.flagLabels[k] || k);
+  const tile = (g: Group, label: string, n: number, tone: string, hint: string) => {
+    const active = f.group === g;
     return (
-      <button key={kind + key} className={`stat ${active ? "active" : ""}`} style={{ border: active ? "2px solid var(--accent)" : "2px solid transparent", textAlign: "left", cursor: "pointer" }}
-        onClick={() => setF((x) => kind === "health" ? { ...x, health: x.health === key ? "" : key, flag: "" } : { ...x, flag: x.flag === key ? "" : key, health: "" })}>
+      <button key={g || "all"} className="stat" title={hint}
+        style={{ border: active ? "2px solid var(--accent)" : "2px solid transparent", textAlign: "left", cursor: "pointer", minWidth: 170 }}
+        onClick={() => setF((x) => ({ ...x, group: x.group === g ? "" : g, problem: "", warning: "" }))}>
         <b style={{ color: tone === "error" ? "var(--error)" : tone === "warning" ? "var(--warning)" : tone === "ok" ? "var(--ok)" : undefined }}>{n.toLocaleString()}</b><span>{label}</span>
       </button>
     );
   };
-  const live = (counts.h.ok || 0);
   const checked = base.filter((r) => !["unchecked", "skipped"].includes(r.health)).length;
 
   return (
@@ -160,55 +189,60 @@ export default function Websites() {
         )}
       </div>
 
-      {/* At a glance */}
+      {/* At a glance — click a tile to filter; pick the specific problem underneath */}
       <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
-        <div className="stat"><b>{base.length.toLocaleString()}</b><span>Websites</span></div>
-        <div className="stat"><b>{base.filter((r) => r.duda_status === "PUBLISHED").length.toLocaleString()}</b><span>Published in Duda</span></div>
-        {tile("ok", L.ok, live, "ok")}
-        {d.healthOrder.filter((h) => h !== "ok").map((h) => tile(h, L[h], counts.h[h] || 0, TONE[h]))}
+        {tile("", "Websites", base.length, "", "Show all")}
+        {tile("ok", "Live on Duda", counts.h.ok || 0, "ok", "Domain loads and is still on Duda")}
+        {tile("unhealthy", "Unhealthy domains", counts.unhealthy, "error", "Redirects, moved off Duda, new owner, parked, 404, server error, DNS, SSL, down")}
+        {tile("attention", "Needs attention", counts.attention, "warning", "Live, but with a warning (renewal overdue, different Duda site, slow, changed, not in latest import)")}
+        {tile("unchecked", "Not checked", counts.unchecked, "", "Not checked yet, or not published in Duda")}
       </div>
-      <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
-        {Object.keys(d.flagLabels).map((k) => tile(k, d.flagLabels[k], counts.fl[k] || 0, k === "staging_domain" ? "" : "warning", "flag"))}
-        {tile("changed", "Health changed since a previous check", counts.changed, "warning", "flag")}
-        {tile("missing", "Not in the latest import (deleted in Duda?)", counts.missing, "warning", "flag")}
-      </div>
+      {f.group === "unhealthy" && (
+        <div className="row small" style={{ flexWrap: "wrap", gap: 6 }}>
+          <span className="muted">Problem:</span>
+          <button className={`sm ${!f.problem ? "primary" : "ghost"}`} onClick={() => setF({ ...f, problem: "" })}>All {counts.unhealthy}</button>
+          {UNHEALTHY.filter((k) => counts.h[k]).map((k) => <button key={k} className={`sm ${f.problem === k ? "primary" : "ghost"}`} onClick={() => setF({ ...f, problem: k })}>{L[k]} {counts.h[k]}</button>)}
+        </div>
+      )}
+      {f.group === "attention" && (
+        <div className="row small" style={{ flexWrap: "wrap", gap: 6 }}>
+          <span className="muted">Warning:</span>
+          <button className={`sm ${!f.warning ? "primary" : "ghost"}`} onClick={() => setF({ ...f, warning: "" })}>All {counts.attention}</button>
+          {WARNINGS.filter((k) => counts.w[k]).map((k) => <button key={k} className={`sm ${f.warning === k ? "primary" : "ghost"}`} onClick={() => setF({ ...f, warning: k })}>{wLabel(k)} {counts.w[k]}</button>)}
+        </div>
+      )}
 
       {/* Filters */}
       <div className="card stack" style={{ boxShadow: "none" }}>
         <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
-          <input style={{ maxWidth: 260 }} placeholder="Search name, domain, alias…" value={f.q} onChange={(e) => setF({ ...f, q: e.target.value })} />
-          <select style={{ maxWidth: 170 }} value={f.status} onChange={(e) => setF({ ...f, status: e.target.value })}>
+          <input style={{ maxWidth: 240 }} placeholder="Search name, domain, alias…" value={f.q} onChange={(e) => setF({ ...f, q: e.target.value })} />
+          <select style={{ maxWidth: 160 }} value={f.status} onChange={(e) => setF({ ...f, status: e.target.value })}>
             <option value="">Any Duda status</option><option value="PUBLISHED">Published</option><option value="UNPUBLISHED">Unpublished</option><option value="IN PLANNING">In planning</option>
           </select>
-          <select style={{ maxWidth: 220 }} value={f.health} onChange={(e) => setF({ ...f, health: e.target.value })}>
-            <option value="">Any domain health</option>{d.healthOrder.map((h) => <option key={h} value={h}>{L[h]}</option>)}
+          <LabelPicker labels={tagLabels} value={f.labels} mode={f.labelMode} onChange={(labels, labelMode) => setF({ ...f, labels, labelMode })} />
+          <select style={{ maxWidth: 150 }} value={f.template} onChange={(e) => setF({ ...f, template: e.target.value })}>
+            <option value="">Any template #</option>{templates.map(([t, n]) => <option key={t} value={t}>Template {t} ({n})</option>)}
           </select>
           <select style={{ maxWidth: 170 }} value={f.domainType} onChange={(e) => setF({ ...f, domainType: e.target.value })}>
             <option value="">Any domain</option><option value="custom">Custom domain</option><option value="staging">Staging (tekmetric.site…)</option>
           </select>
+          <button className="sm ghost" onClick={() => setMoreOpen((x) => !x)}>{moreOpen ? "Hide dates ▴" : "Dates ▾"}{!moreOpen && (f.createdFrom || f.createdTo || f.firstFrom || f.firstTo || f.lastFrom || f.lastTo) ? " •" : ""}</button>
           <span className="spacer" />
           <button className="sm ghost" onClick={() => setF(EMPTY)}>Clear filters</button>
         </div>
-        <div className="row small" style={{ flexWrap: "wrap", gap: 12 }}>
-          <DateRange label="Created" from={f.createdFrom} to={f.createdTo} set={(a, b) => setF({ ...f, createdFrom: a, createdTo: b })} />
-          <DateRange label="First published" from={f.firstFrom} to={f.firstTo} set={(a, b) => setF({ ...f, firstFrom: a, firstTo: b })} />
-          <DateRange label="Last published" from={f.lastFrom} to={f.lastTo} set={(a, b) => setF({ ...f, lastFrom: a, lastTo: b })} />
-        </div>
-        <div className="row small" style={{ flexWrap: "wrap", gap: 4 }}>
-          <span className="muted">Labels</span>
-          <select className="sm" value={f.labelMode} onChange={(e) => setF({ ...f, labelMode: e.target.value as "any" | "all" })} style={{ width: "auto" }}>
-            <option value="any">match any</option><option value="all">match all</option>
-          </select>
-          {allLabels.map(([l, n]) => (
-            <button key={l} className={`sm ${f.labels.includes(l) ? "primary" : "ghost"}`} onClick={() => setF({ ...f, labels: f.labels.includes(l) ? f.labels.filter((x) => x !== l) : [...f.labels, l] })}>{l} <span className="muted">{n}</span></button>
-          ))}
-        </div>
+        {moreOpen && (
+          <div className="row small" style={{ flexWrap: "wrap", gap: 12 }}>
+            <DateRange label="Created" from={f.createdFrom} to={f.createdTo} set={(a, b) => setF({ ...f, createdFrom: a, createdTo: b })} />
+            <DateRange label="First published" from={f.firstFrom} to={f.firstTo} set={(a, b) => setF({ ...f, firstFrom: a, firstTo: b })} />
+            <DateRange label="Last published" from={f.lastFrom} to={f.lastTo} set={(a, b) => setF({ ...f, lastFrom: a, lastTo: b })} />
+          </div>
+        )}
       </div>
 
       {/* List */}
       <div className="card">
         <div className="row between small" style={{ marginBottom: 8 }}>
-          <span className="muted">{shown.length.toLocaleString()} website(s){f.health || f.flag ? " (tile filter on — click it again to clear)" : ""}</span>
+          <span className="muted">{shown.length.toLocaleString()} website(s)</span>
           <Pager page={page} total={shown.length} set={setPage} />
         </div>
         {!d.rows.length ? <p className="muted">No websites yet. {d.canManage ? <>Click <b>Import site list (CSV)</b> and drop Duda&apos;s export.</> : "Ask an admin to import Duda's site list."}</p> : (
@@ -226,7 +260,7 @@ export default function Websites() {
                     <td>
                       <span className={`badge ${TONE[r.health] || ""}`}>{L[r.health] || r.health}</span>
                       {r.health_detail && <div className="muted" style={{ maxWidth: 380 }}>{r.health_detail}</div>}
-                      {fl.map((x) => <div key={x}><span className="badge warning">{d.flagLabels[x] || x}</span></div>)}
+                      {fl.filter((x) => x !== "staging_domain").map((x) => <div key={x}><span className="badge warning">{d.flagLabels[x] || x}</span></div>)}
                       {r.health_changed_at && r.prev_health && <div className="muted">Was “{L[r.prev_health] || r.prev_health}” — changed {ago(r.health_changed_at)}</div>}
                     </td>
                     <td style={{ whiteSpace: "nowrap" }}>{ago(r.checked_at)}<div><button className="sm" disabled={busy[r.id]} onClick={(e) => { e.stopPropagation(); checkOne(r.id); }}>{busy[r.id] ? "Checking…" : "Check now"}</button></div></td>
@@ -239,6 +273,42 @@ export default function Websites() {
         )}
         <div className="row" style={{ justifyContent: "flex-end", marginTop: 8 }}><Pager page={page} total={shown.length} set={setPage} /></div>
       </div>
+    </div>
+  );
+}
+
+/** Compact label filter: a button that opens a checklist (instead of 50 chips on the page). */
+function LabelPicker({ labels, value, mode, onChange }: { labels: [string, number][]; value: string[]; mode: "any" | "all"; onChange: (v: string[], m: "any" | "all") => void }) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState("");
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent) => { if (!(e.target as HTMLElement).closest?.(".label-picker")) setOpen(false); };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+  const list = labels.filter(([l]) => !q || l.toLowerCase().includes(q.toLowerCase()));
+  return (
+    <div className="label-picker" style={{ position: "relative" }}>
+      <button onClick={() => setOpen((x) => !x)} style={{ minWidth: 150, textAlign: "left" }}>
+        {value.length ? `Labels: ${value.slice(0, 3).join(", ")}${value.length > 3 ? ` +${value.length - 3}` : ""}` : "Any label"} ▾
+      </button>
+      {open && (
+        <div className="card stack small" style={{ position: "absolute", zIndex: 20, top: "110%", left: 0, width: 260, maxHeight: 360, overflowY: "auto", padding: 10 }}>
+          <input placeholder="Find a label…" value={q} onChange={(e) => setQ(e.target.value)} autoFocus />
+          <div className="row" style={{ gap: 6 }}>
+            <span className="muted">Show sites with</span>
+            <select value={mode} onChange={(e) => onChange(value, e.target.value as "any" | "all")} style={{ width: "auto" }}><option value="any">any of these</option><option value="all">all of these</option></select>
+          </div>
+          {list.map(([l, n]) => (
+            <label key={l} className="row" style={{ gap: 6, cursor: "pointer" }}>
+              <input type="checkbox" checked={value.includes(l)} onChange={() => onChange(value.includes(l) ? value.filter((x) => x !== l) : [...value, l], mode)} />
+              <span style={{ flex: 1 }}>{l}</span><span className="muted">{n}</span>
+            </label>
+          ))}
+          {value.length > 0 && <button className="sm ghost" onClick={() => onChange([], mode)}>Clear labels</button>}
+        </div>
+      )}
     </div>
   );
 }

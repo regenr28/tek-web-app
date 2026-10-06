@@ -2,7 +2,7 @@ import * as cheerio from "cheerio";
 import { safeFetch } from "./net";
 import { UA } from "./crawl";
 import { mapsSearch, webSearch, searchAvailable, placeReviews, type Place, type WebResult, type Review } from "./search";
-import { callAI, parseJson } from "./ai";
+import { callAI, parseJson, groqBrowserSearch } from "./ai";
 import {
   type Collection, type FieldKey, type CField, type Source, FIELDS, LOC_FIELDS, PER_LOCATION, applyRules, joinNote, splitLinesKeep, uniqLines, titleCase,
   parseCityState, stripCountry, checkPhone, domainOf, websiteUrl, certsMentioned, dropClosedDays,
@@ -23,6 +23,7 @@ export type Evidence = {
   website?: { url: string; finalUrl: string; pages: { url: string; title: string; text: string }[]; socials: string[]; signals: Record<string, unknown>; at: string };
   search?: { queries: string[]; provider: string; results: WebResult[]; at: string };
   reviews?: { key: string; provider: string; all: Review[]; at: string };
+  years?: { established: string; experience: string; quote: string; url: string; via: string; at: string };
 };
 
 export type StepId = "gbp" | "website" | "search" | "ai" | "review";
@@ -556,7 +557,7 @@ export async function stepWebsite(c: Collection, ev: Evidence): Promise<string> 
       note: fits && brandMatch ? `Decision: using their current domain ${d} (matches the shop name).` : `Decision needed: current domain ${d} doesn't clearly match "${c.fields.shopName.value}" — confirm with the client before using it.` });
   }
 
-  addSocialsSmart(c, [...socials], "website", "Found on their website");
+  addSocialsSmart(c, [...socials], "website", `linked on their website (${domainOf(home.url)})`);
   const certs = certsMentioned(pages.map((p) => p.text).join(" "));
   const have = c.fields.certifications.value.toLowerCase();
   const newCerts = certs.filter((x) => !have.includes(x.toLowerCase()));
@@ -615,7 +616,16 @@ export function cleanSocials(lines: string[]) {
   return { list: [...out.map((o) => o.clean), ...other], extras, skipped };
 }
 
-function addSocials(c: Collection, urls: string[], source: Source, why: string, ratingByUrl: Record<string, number | undefined> = {}, target?: CField, review = false) {
+/** Adds a "• Platform: reason" line (one per platform) to a socials note. */
+function setReason(f: CField, platform: string, reason: string) {
+  const lines = f.note.split("\n").filter((l) => !l.startsWith(`• ${platform}:`));
+  const at = lines.findIndex((l) => l.startsWith("• "));
+  const line = `• ${platform}: ${reason}`;
+  if (at >= 0) lines.splice(at, 0, line); else lines.unshift(line);
+  f.note = lines.filter(Boolean).join("\n");
+}
+
+function addSocials(c: Collection, urls: string[], source: Source, why: string, ratingByUrl: Record<string, number | undefined> = {}, target?: CField, review = false, reasons: Record<string, string> = {}) {
   const tf = target || c.fields.socials;
   const cur = splitLinesKeep(tf.value);
   const incoming: string[] = [];
@@ -633,13 +643,18 @@ function addSocials(c: Collection, urls: string[], source: Source, why: string, 
   const added = res.list.filter((u) => { const k = profileOf(u)?.key; return k && !beforeKeys.has(k); });
   tf.value = res.list.join("\n\n");
   if (tf.value && !tf.source) tf.source = source;
-  tf.note = tf.note.replace(/Research will look for this location's Facebook\/Yelp\/etc\.\s*/, "").replace(/Search found accounts will be added during research\.\s*/, "").trim();
-  if (added.length) patchField(tf, { note: `${why}: ${added.map(platformOf).join(", ")}.`, source, status: review ? "review" : undefined });
+  tf.note = tf.note.replace(/Research will look for this location's Facebook\/Yelp\/etc\.\s*/, "").replace(/Search found accounts will be added during research\.\s*/, "").replace(/No social links in Jira — research will look for them\.\s*/, "").trim();
+  for (const u of added) {
+    const orig = incoming.find((x) => profileOf(x)?.key === profileOf(u)?.key) || u;
+    const rating = ratingByUrl[orig] != null ? ` · ${ratingByUrl[orig]}★` : "";
+    setReason(tf, platformOf(u), `${reasons[orig] || why}${rating}`);
+  }
+  if (added.length && review) tf.status = "review";
   const extras = res.extras.filter((x) => !tf.note.includes(x));
   if (extras.length) patchField(tf, { note: `Also found (not added — one profile per platform): ${extras.join(" · ")}`, source });
 }
 
-/** Re-cleans every social list (Jira values can contain posts or duplicates). */
+/** Re-cleans every social list (Jira values can contain posts or duplicates) and gives every link a reason. */
 function tidySocials(c: Collection) {
   const fix = (f: CField) => {
     if (f.manual || !f.value.trim()) return;
@@ -649,10 +664,47 @@ function tidySocials(c: Collection) {
       f.value = v;
       if (res.extras.length) f.note = joinNote(f.note, `Also found (not added — one profile per platform): ${res.extras.join(" · ")}`);
     }
-    f.note = f.note.replace(/Review: [^\n]*(duplicate|separator)[^\n]*\n?/gi, "").trim();
+    f.note = f.note.replace(/Review: [^\n]*(duplicate|separator)[^\n]*\n?/gi, "").replace(/^(Found on their website|Found by web search|Found by Groq AI search[^:]*): [^\n]*\n?/gim, "").trim();
+    // links that came with the Jira form
+    for (const u of res.list) { const pl = platformOf(u); if (pl && !f.note.includes(`• ${pl}:`)) setReason(f, pl, "from Jira (provided by the client)"); }
   };
   fix(c.fields.socials);
   for (const L of c.locations) fix(L.fields.socials);
+}
+
+// ---------- is this listing really this shop? ----------
+
+const STATE_NAMES: Record<string, string> = { AL: "Alabama", AK: "Alaska", AZ: "Arizona", AR: "Arkansas", CA: "California", CO: "Colorado", CT: "Connecticut", DE: "Delaware", DC: "District of Columbia", FL: "Florida", GA: "Georgia", HI: "Hawaii", ID: "Idaho", IL: "Illinois", IN: "Indiana", IA: "Iowa", KS: "Kansas", KY: "Kentucky", LA: "Louisiana", ME: "Maine", MD: "Maryland", MA: "Massachusetts", MI: "Michigan", MN: "Minnesota", MS: "Mississippi", MO: "Missouri", MT: "Montana", NE: "Nebraska", NV: "Nevada", NH: "New Hampshire", NJ: "New Jersey", NM: "New Mexico", NY: "New York", NC: "North Carolina", ND: "North Dakota", OH: "Ohio", OK: "Oklahoma", OR: "Oregon", PA: "Pennsylvania", RI: "Rhode Island", SC: "South Carolina", SD: "South Dakota", TN: "Tennessee", TX: "Texas", UT: "Utah", VT: "Vermont", VA: "Virginia", WA: "Washington", WV: "West Virginia", WI: "Wisconsin", WY: "Wyoming", PR: "Puerto Rico" };
+type LocInfo = { city: string; state: string; phone: string; address: string };
+function locInfos(c: Collection): LocInfo[] {
+  if (c.locations.length) return c.locations.map((L) => ({ city: L.city, state: L.state, phone: L.fields.phone.value, address: L.fields.address.value }));
+  const [city, state] = c.fields.cityState.value.split(",").map((x) => x.trim());
+  return [{ city: city || "", state: (state || "").slice(0, 2), phone: c.fields.phone.value, address: c.fields.address.value }];
+}
+const reEsc = (x: string) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/** Which details of the shop a search result / listing shows (phone, street, ZIP, city + state). */
+function matchSignals(text: string, L: LocInfo): { strong: string[]; cityOnly: boolean } {
+  const t = ` ${text.toLowerCase().replace(/[-_+]/g, " ")} `;
+  const strong: string[] = [];
+  const ph = digits(L.phone);
+  if (ph.length === 10 && text.replace(/\D/g, "").includes(ph)) strong.push(`the same phone ${L.phone}`);
+  const street = L.address.split(",")[0].trim();
+  const num = street.match(/^\d+/)?.[0];
+  const word = street.replace(/^\d+\s+/, "").split(/\s+/).find((w) => w.length > 2 && !/^(north|south|east|west|n|s|e|w|nw|ne|sw|se)\.?$/i.test(w));
+  if (num && word && new RegExp(`\\b${num}\\b`).test(t) && t.includes(word.toLowerCase().replace(/\.$/, ""))) strong.push(`the same street address (${street})`);
+  const zip = L.address.match(/\b\d{5}\b(?!.*\b\d{5}\b)/)?.[0];
+  if (zip && new RegExp(`\\b${zip}\\b`).test(t)) strong.push(`the same ZIP ${zip}`);
+  const cityHit = !!L.city && new RegExp(`\\b${reEsc(L.city.toLowerCase())}\\b`).test(t);
+  const stateHit = !!L.state && (new RegExp(`\\b${L.state.toLowerCase()}\\b`).test(t) || (!!STATE_NAMES[L.state] && t.includes(STATE_NAMES[L.state].toLowerCase())));
+  if (cityHit && stateHit) strong.push(`${L.city}, ${L.state}`);
+  return { strong, cityOnly: cityHit && !stateHit && !strong.length };
+}
+function verifyListing(c: Collection, r: WebResult) {
+  let urlText = r.url; try { urlText = decodeURIComponent(r.url); } catch { /* keep */ }
+  const text = `${r.title} ${r.snippet} ${urlText}`;
+  let best = { strong: [] as string[], cityOnly: false, loc: -1 };
+  locInfos(c).forEach((L, i) => { const m = matchSignals(text, L); if (m.strong.length > best.strong.length || (!best.strong.length && m.cityOnly && !best.cityOnly)) best = { ...m, loc: i }; });
+  return best;
 }
 
 /** MSO: which location a URL/text belongs to (by city name), or -1. */
@@ -661,23 +713,116 @@ function locationIndexFor(c: Collection, text: string) {
   const hits = c.locations.map((L, i) => ({ i, tok: L.city.toLowerCase().replace(/[^a-z]/g, "") })).filter((x) => x.tok.length > 2 && t.includes(x.tok));
   return hits.length === 1 ? hits[0].i : -1;
 }
-function addSocialsSmart(c: Collection, urls: string[], source: Source, why: string, ratingByUrl: Record<string, number | undefined> = {}, context: Record<string, string> = {}, review = false) {
-  if (!c.locations.length) return addSocials(c, urls, source, why, ratingByUrl, undefined, review);
+function addSocialsSmart(c: Collection, urls: string[], source: Source, why: string, ratingByUrl: Record<string, number | undefined> = {}, context: Record<string, string> = {}, review = false, reasons: Record<string, string> = {}, locHint: Record<string, number> = {}) {
+  if (!c.locations.length) return addSocials(c, urls, source, why, ratingByUrl, undefined, review, reasons);
   const buckets = new Map<number, string[]>();
   for (const u of urls) {
-    const i = locationIndexFor(c, `${u} ${context[u] || ""}`);
+    const i = locHint[u] >= 0 ? locHint[u] : locationIndexFor(c, `${u} ${context[u] || ""}`);
     const idx = i >= 0 ? i : 0;
     buckets.set(idx, [...(buckets.get(idx) || []), u]);
   }
-  for (const [i, list] of buckets) addSocials(c, list, source, why, ratingByUrl, c.locations[i].fields.socials, review);
+  for (const [i, list] of buckets) addSocials(c, list, source, why, ratingByUrl, c.locations[i].fields.socials, review, reasons);
+}
+
+/** Opens each page (directly, or through Groq's browser when the site blocks us) and checks it shows this shop. */
+async function confirmListings(c: Collection, list: WebResult[]): Promise<Record<string, { loc: number; reason: string }>> {
+  const out: Record<string, { loc: number; reason: string }> = {};
+  if (!list.length) return out;
+  const locs = locInfos(c);
+  const check = (text: string) => { let best = { s: [] as string[], loc: -1 }; locs.forEach((L, i) => { const m = matchSignals(text, L); if (m.strong.length > best.s.length) best = { s: m.strong, loc: i }; }); return best; };
+  const left: WebResult[] = [];
+  await Promise.all(list.map(async (r) => {
+    try {
+      const res = await safeFetch(r.url, { hosts: "public", headers: { "User-Agent": UA, Accept: "text/html", "Accept-Language": "en-US" }, timeoutMs: 12000, maxBytes: 3_000_000 });
+      if (res.status < 400) {
+        const $ = cheerio.load(res.text());
+        const text = [$("title").text(), $('meta[name="description"]').attr("content") || "", $('meta[property="og:description"]').attr("content") || "", $("script[type='application/ld+json']").text(), $("body").text()].join(" ").replace(/\s+/g, " ").slice(0, 200_000);
+        const b = check(text);
+        if (b.s.length) { out[r.url] = { loc: b.loc, reason: `the ${platformOf(r.url)} page shows ${b.s.join(", ")}` }; return; }
+      }
+    } catch { /* blocked — try Groq */ }
+    left.push(r);
+  }));
+  if (!left.length) return out;
+  const shops = locs.map((L) => `${c.fields.shopName.value}, ${L.address || `${L.city}, ${L.state}`}${L.phone ? `, phone ${L.phone}` : ""}`).join(" | ");
+  try {
+    const text = await groqBrowserSearch(`Open each of these pages and check whether it is the listing/profile of this auto repair shop: ${shops}.
+Pages:\n${left.map((r) => `- ${r.url}`).join("\n")}
+For each page copy the exact address and/or phone number it shows. Return ONLY JSON: {"pages":[{"url":"","shows":"exact address or phone text from the page, or empty if none"}]}`);
+    const j = parseJson<{ pages?: { url: string; shows: string }[] }>(text);
+    for (const pg of j?.pages || []) {
+      const r = left.find((x) => x.url === pg.url || profileOf(x.url)?.key === profileOf(pg.url || "")?.key);
+      if (!r || !pg.shows) continue;
+      const b = check(pg.shows);
+      if (b.s.length) out[r.url] = { loc: b.loc, reason: `the ${platformOf(r.url)} page shows ${b.s.join(", ")} (checked by Groq AI — open it to double-check)` };
+    }
+  } catch { /* no Groq / limit — leave them out */ }
+  return out;
+}
+
+// ---------- years in business (for About Us) ----------
+
+const THIS_YEAR = new Date().getFullYear();
+/** "Established in 2012", "since 1998", "over 25 years experience" … with the sentence it came from. */
+export function yearsIn(text: string): { established: string; experience: string; quote: string } | null {
+  const est = text.match(/\b(?:established|founded|opened|serving[^.]{0,40}?since|in business since|family[- ]owned since|since)\s*(?:in\s*|:\s*)?((?:19|20)\d{2})\b/i);
+  const exp = text.match(/\b((?:over|more than|nearly|almost)\s+\d{1,2}\+?|\d{1,2}\+)\s*years?\s+(?:of\s+)?(?:combined\s+)?(?:experience|in business|serving|in the (?:field|industry|business|automotive))/i)
+    || text.match(/\b(\d{1,2})\s+years?\s+(?:of\s+)?(?:combined\s+)?(?:experience|in business)/i);
+  const y = est ? Number(est[1]) : 0;
+  const established = y >= 1900 && y <= THIS_YEAR ? String(y) : "";
+  const experience = exp ? `${exp[1].replace(/\s+/g, " ").trim()}${/\+$/.test(exp[1]) ? "" : ""} years`.replace(/\+ years/, "+ years") : "";
+  if (!established && !experience) return null;
+  const at = (est?.index ?? exp?.index ?? 0);
+  const from = Math.max(0, text.lastIndexOf(".", at) + 1), to = text.indexOf(".", at + 10);
+  return { established, experience, quote: text.slice(from, to > 0 ? to + 1 : at + 160).trim().slice(0, 220) };
+}
+
+async function findYears(c: Collection, ev: Evidence, results: WebResult[], relevant: (r: WebResult) => boolean): Promise<string> {
+  const f = c.fields.about;
+  if (f.manual) return "";
+  const hits: { established: string; experience: string; quote: string; url: string; via: string }[] = [];
+  for (const p of ev.website?.pages || []) { const y = yearsIn(p.text); if (y) hits.push({ ...y, url: p.url, via: "their website" }); }
+  for (const r of results.filter(relevant)) {
+    const v = verifyListing(c, r);
+    const y = yearsIn(`${r.title}. ${r.snippet}`);
+    if (y && (v.strong.length || /yelp|bbb|facebook|google|carfax|repairpal|mapquest|yellowpages/i.test(r.url))) hits.push({ ...y, url: r.url, via: new URL(r.url).hostname.replace(/^www\./, "") });
+  }
+  if (!hits.some((h) => h.established) && !(ev.years?.established)) {
+    // ask Groq to look at Yelp "History", BBB "Years in business", Facebook About … for this exact address
+    const L = locInfos(c)[0];
+    try {
+      const text = await groqBrowserSearch(`How long has the auto repair shop "${c.fields.shopName.value}" at ${L.address || `${L.city}, ${L.state}`}${L.phone ? ` (phone ${L.phone})` : ""} been in business? Check its Yelp page ("History — Established in"), BBB ("Years in Business" / "Business Started"), Facebook About and Google. Only use a page that shows this same address or phone.
+Return ONLY JSON: {"established":"YYYY or empty","experience":"e.g. over 25 years, or empty","quote":"the exact words from the page","url":"the page"}`);
+      const j = parseJson<{ established?: string; experience?: string; quote?: string; url?: string }>(text);
+      const y = Number(j?.established || 0);
+      if (j?.url && /^https?:\/\//.test(j.url) && j.quote && ((y >= 1900 && y <= THIS_YEAR && j.quote.includes(String(y))) || (j.experience && /\d/.test(j.quote))))
+        hits.push({ established: y ? String(y) : "", experience: j.experience || "", quote: j.quote.slice(0, 220), url: j.url, via: `${new URL(j.url).hostname.replace(/^www\./, "")} (via Groq AI)` });
+    } catch { /* no Groq */ }
+  }
+  if (!hits.length && !ev.years) return "";
+  const best = hits.length ? { established: hits.find((h) => h.established)?.established || "", experience: hits.find((h) => h.experience)?.experience || "", quote: (hits.find((h) => h.established) || hits[0]).quote, url: (hits.find((h) => h.established) || hits[0]).url, via: (hits.find((h) => h.established) || hits[0]).via } : ev.years!;
+  ev.years = { ...best, at: now() };
+  const src = hits.map((h) => `"${h.quote}" (${h.via}: ${h.url})`).filter((x, i, a) => a.indexOf(x) === i).slice(0, 3).join(" · ");
+  const sentence = best.established && best.experience ? `Established in ${best.established}, our team brings ${best.experience} of experience.`
+    : best.established ? `Established in ${best.established}.` : `Our team brings ${best.experience} of experience.`;
+  const jiraHasYears = /\b(19|20)\d{2}\b|\b\d{1,2}\+?\s+years\b|since\b/i.test(f.value);
+  if (f.value.trim() && jiraHasYears) { patch(c, "about", { note: `Years in business found online: ${src} — the About Us already mentions years, so it wasn't changed (Jira wins).`, source: "search" }); return "years found"; }
+  if (f.value.trim() && !f.value.includes(sentence)) {
+    f.value = `${f.value.trim().replace(/\s*$/, "")} ${sentence}`;
+    f.status = "review";
+    f.note = joinNote(f.note.replace(/^Added "Established[^\n]*\n?/m, ""), `Added "${sentence}" from ${src} — confirm.`);
+    return "years added to About Us";
+  }
+  if (!f.value.trim()) patch(c, "about", { note: `Years in business: ${sentence} Source: ${src}`, source: "search", status: "review" });
+  return "years found";
 }
 
 // ---------- 3. Web & social search ----------
 
-export async function stepSearch(c: Collection, ev: Evidence): Promise<string> {
+/** The web searches the research step runs for this project (exported for tests). */
+export function searchQueries(c: Collection): string[] {
   const name = c.fields.shopName.value;
   const [city, st] = c.locations.length ? [c.locations[0].city, c.locations[0].state] : c.fields.cityState.value.split(",").map((s) => s.trim());
-  if (!name) return "Skipped — no shop name";
   const where = [city, st].filter(Boolean).join(" ");
   const queries = [`"${name}" ${where}`];
   if (c.locations.length) {
@@ -689,8 +834,16 @@ export async function stepSearch(c: Collection, ev: Evidence): Promise<string> {
   }
   const needs = (["coupons", "warranties", "financing", "certifications"] as FieldKey[]).filter((k) => c.fields[k].status !== "ok");
   if (needs.length) queries.push(`"${name}" ${where} coupon OR special OR warranty OR "NAPA AutoCare" OR financing OR ASE`);
+  if (!/\b(19|20)\d{2}\b|\byears\b/i.test(c.fields.about.value)) queries.push(`"${name}" ${where} established OR "years experience" OR "in business since" OR history`);
   const site = c.fields.existingWebsite.value ? domainOf(websiteUrl(c.fields.existingWebsite.value) || c.fields.existingWebsite.value).replace(/^www\./, "") : "";
   if (site && /\./.test(site) && (!c.fields.warranties.value || c.fields.warranties.source !== "jira")) queries.push(`site:${site} warranty OR guarantee`);
+  return queries;
+}
+
+export async function stepSearch(c: Collection, ev: Evidence): Promise<string> {
+  const name = c.fields.shopName.value;
+  if (!name) return "Skipped — no shop name";
+  const queries = searchQueries(c);
 
   const cachedQs = ev.search?.queries.join("|");
   let results: WebResult[] = [], provider = "";
@@ -711,11 +864,34 @@ export async function stepSearch(c: Collection, ev: Evidence): Promise<string> {
     const hay = norm(`${r.title} ${r.snippet} ${decodeURIComponent(r.url)}`);
     return nameTok.length ? nameTok.filter((t) => hay.includes(t)).length / nameTok.length >= 0.6 : false;
   };
-  const socials = results.filter((r) => platformOf(r.url) && relevant(r) && !GENERIC_SOCIAL.test(new URL(r.url).pathname));
-  const ratingByUrl = Object.fromEntries(socials.map((r) => [r.url, r.rating]));
-  const ctx = Object.fromEntries(socials.map((r) => [r.url, `${r.title} ${r.snippet}`]));
-  addSocialsSmart(c, socials.filter((r) => !r.ai).map((r) => r.url), "search", "Found by web search", ratingByUrl, ctx);
-  addSocialsSmart(c, socials.filter((r) => r.ai).map((r) => r.url), "search", "Found by Groq AI search — open each link to double-check", ratingByUrl, ctx, true);
+  const candidates = results.filter((r) => platformOf(r.url) && profileOf(r.url) && relevant(r) && !GENERIC_SOCIAL.test(new URL(r.url).pathname));
+  // Only add a profile when the listing shows this shop's phone, street address, ZIP or city + state — a similar name isn't enough
+  const accepted: WebResult[] = [], reasons: Record<string, string> = {}, locHint: Record<string, number> = {}, rejected: string[] = [];
+  const unsure: { r: WebResult; cityOnly: boolean }[] = [];
+  for (const r of candidates) {
+    const v = verifyListing(c, r);
+    if (v.strong.length) {
+      accepted.push(r); locHint[r.url] = v.loc;
+      reasons[r.url] = `${r.ai ? "Groq AI search" : "web search"} result shows ${v.strong.join(", ")}${r.ai ? " — open it to double-check" : ""}`;
+    } else if (!unsure.some((x) => profileOf(x.r.url)!.key === profileOf(r.url)!.key)) unsure.push({ r, cityOnly: v.cityOnly });
+  }
+  // Second chance: open the page itself (or let Groq open it) and look for the address / phone
+  const confirmed = await confirmListings(c, unsure.slice(0, 5).map((x) => x.r));
+  for (const x of unsure) {
+    const clean = profileOf(x.r.url)!.clean;
+    const ok = confirmed[x.r.url];
+    if (ok) { accepted.push(x.r); locHint[x.r.url] = ok.loc; reasons[x.r.url] = ok.reason; }
+    else rejected.push(`${clean} (${x.cityOnly ? "only the city matched — could be another state" : "only the name is similar — no matching address, phone or city"})`);
+  }
+  const ratingByUrl = Object.fromEntries(accepted.map((r) => [r.url, r.rating]));
+  const ctx = Object.fromEntries(accepted.map((r) => [r.url, `${r.title} ${r.snippet}`]));
+  addSocialsSmart(c, accepted.filter((r) => !r.ai).map((r) => r.url), "search", "found by web search", ratingByUrl, ctx, false, reasons, locHint);
+  addSocialsSmart(c, accepted.filter((r) => r.ai).map((r) => r.url), "search", "found by Groq AI search", ratingByUrl, ctx, true, reasons, locHint);
+  const socials = accepted;
+  if (rejected.length) {
+    const tf = c.fields.socials.manual ? null : c.locations.length ? c.locations[0].fields.socials : c.fields.socials;
+    if (tf) { tf.note = tf.note.split("\n").filter((l) => !l.startsWith("Not added — couldn't confirm")).join("\n"); patchField(tf, { note: `Not added — couldn't confirm it's this shop: ${rejected.slice(0, 5).join(" · ")}`, source: "search" }); }
+  }
 
   // Certification / directory evidence
   const certHits: string[] = [];
@@ -728,8 +904,9 @@ export async function stepSearch(c: Collection, ev: Evidence): Promise<string> {
     else if (/aaa\.com/i.test(h) && /approved auto repair/i.test(r.title + r.snippet)) certHits.push(`AAA Approved Auto Repair: ${r.url}`);
   }
   if (certHits.length) patch(c, "certifications", { note: `Found online (confirm before adding): ${certHits.slice(0, 5).join(" · ")}`, source: "search", status: "review" });
+  const yrs = await findYears(c, ev, results, relevant).catch(() => "");
   tidySocials(c);
-  return `${results.length} results via ${provider}; ${socials.length} social profile(s) matched`;
+  return `${results.length} results via ${provider}; ${socials.length} social profile(s) confirmed${rejected.length ? `, ${rejected.length} not added (couldn't confirm)` : ""}${yrs ? `; ${yrs}` : ""}`;
 }
 
 // ---------- 4. AI fill & format ----------
@@ -820,9 +997,9 @@ ${evidenceBlock(ev, /services|amenities|about/i, 7000)}` });
 - warranties: e.g. "36 Months / 36,000 Miles" (add "Nationwide" / "Parts & Labor" if stated). Check the WARRANTY SENTENCES and every page (blog posts too). If they're a NAPA AutoCare Center or PAC member, use that program's warranty only if the EVIDENCE shows it. Cite the page URL in note.
 - financing: providers/terms only if the site states them (e.g. Synchrony Car Care, Snap, Affirm).
 - certifications: affiliations shown in EVIDENCE (ASE, NAPA AutoCare, AAA, Carfax, BBB, Bosch, etc.). Include JIRA ones.
-- about: 1–3 sentences only if JIRA About Us is empty.
+- about: 1–3 sentences only if JIRA About Us is empty. Mention how long they've been in business when YEARS IN BUSINESS is given.
 - flags: short warnings (e.g. "Website is an older brand", "Looks fully mobile", "Yelp under 4★").
-Shop: ${c.fields.shopName.value}, ${c.fields.cityState.value}. Pages requested: ${c.pages.join(", ") || "(none)"}.
+Shop: ${c.fields.shopName.value}, ${c.fields.cityState.value}. Pages requested: ${c.pages.join(", ") || "(none)"}.${ev.years ? `\nYEARS IN BUSINESS: ${[ev.years.established && `established ${ev.years.established}`, ev.years.experience && `${ev.years.experience} of experience`].filter(Boolean).join(", ")} (source: ${ev.years.url})` : ""}
 CURRENT:
 ${current}
 

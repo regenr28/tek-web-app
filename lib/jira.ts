@@ -84,7 +84,7 @@ export function toProject(fields: JiraFields, activity: JiraProject["activity"])
   const key = pick(fields, /^Issue key$/i);
   const t = detectType(fields);
   const pages = [
-    ...pickAll(fields, /what pages do you want/i).filter((p) => !/^other$/i.test(p)),
+    ...pickAll(fields, /what (pages|sections) do you want/i).filter((p) => !/^other$/i.test(p)),
     ...splitList(pick(fields, /what other pages/i)),
   ];
   return {

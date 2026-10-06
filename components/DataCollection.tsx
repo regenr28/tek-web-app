@@ -140,12 +140,12 @@ export default function DataCollection({ siteId, onChanged }: { siteId: number; 
 
       {view === "sheet" ? (
         <div className="stack">
-          <p className="muted small" style={{ margin: 0 }}>Exactly what “Copy for Google Sheet” pastes: click cell A1 of an empty block in your Data Collection tab and paste. Column A labels, B values, C notes, D requested pages.</p>
+          <p className="muted small" style={{ margin: 0 }}>Exactly what “Copy for Google Sheet” pastes: click cell A1 of an empty block in your Data Collection tab and paste. Column A labels, B values, C notes, D requested pages. You can also highlight any cells here and copy them — the grey row numbers and column letters are never included.</p>
           <div style={{ overflowX: "auto" }}>
-            <table className="t sheet">
-              <thead><tr><th style={{ width: 34 }}></th><th>A</th><th>B</th><th>C</th><th>D</th></tr></thead>
+            <table className="t sheet" onCopy={(e) => sheetCopy(e, d.rows)}>
+              <thead className="noselect" aria-hidden="true"><tr><th style={{ width: 34 }}></th>{["A", "B", "C", "D"].map((x) => <th key={x} data-col={x} />)}</tr></thead>
               <tbody>{d.rows.map((r, i) => (
-                <tr key={i}><td className="muted small">{i + 1}</td>{[0, 1, 2, 3].map((j) => <td key={j} className={j === 0 ? "small" : j === 2 ? "small muted" : "small"} style={{ whiteSpace: "pre-wrap", fontWeight: j === 0 ? 600 : 400 }}>{r[j]}</td>)}</tr>
+                <tr key={i}><td className="muted small noselect rownum" aria-hidden="true" />{[0, 1, 2, 3].map((j) => <td key={j} data-r={i} data-c={j} className={j === 0 ? "small" : j === 2 ? "small muted" : "small"} style={{ whiteSpace: "pre-wrap", fontWeight: j === 0 ? 600 : 400 }}>{r[j]}</td>)}</tr>
               ))}</tbody>
             </table>
           </div>
@@ -200,6 +200,8 @@ export default function DataCollection({ siteId, onChanged }: { siteId: number; 
         </>
       )}
 
+      <ReviewsCard f={c.fields.reviews} onSave={(p) => saveField("reviews", p)} copy={copy} copied={copied} />
+
       <div className="grid2">
         <div className="card stack" style={{ boxShadow: "none" }}>
           <h3 style={{ margin: 0 }}>Requested pages <span className="muted small">(column D)</span></h3>
@@ -212,6 +214,64 @@ export default function DataCollection({ siteId, onChanged }: { siteId: number; 
         </div>
         <Evidence ev={d.evidence} locs={c.locations} />
       </div>
+    </div>
+  );
+}
+
+/**
+ * Highlight-and-copy in the sheet layout works like Google Sheets: the clipboard gets exactly the highlighted
+ * block of cells (no row numbers / column letters), so it pastes into the right columns.
+ */
+function sheetCopy(e: React.ClipboardEvent<HTMLTableElement>, rows: string[][]) {
+  const sel = window.getSelection();
+  if (!sel || sel.isCollapsed) return;
+  const cellOf = (n: Node | null) => ((n instanceof Element ? n : n?.parentElement)?.closest("td[data-r]") as HTMLElement | null);
+  const pos = (td: HTMLElement) => ({ r: Number(td.dataset.r), c: Number(td.dataset.c) });
+  const a = cellOf(sel.anchorNode), f = cellOf(sel.focusNode);
+  if (a && f && a === f) return; // text inside one cell: normal copy
+  let pts: { r: number; c: number }[];
+  if (a && f) pts = [pos(a), pos(f)];
+  else pts = [...e.currentTarget.querySelectorAll<HTMLElement>("td[data-r]")].filter((td) => sel.containsNode(td, true)).map(pos);
+  if (!pts.length) return;
+  const r0 = Math.min(...pts.map((p) => p.r)), r1 = Math.max(...pts.map((p) => p.r));
+  const c0 = Math.min(...pts.map((p) => p.c)), c1 = Math.max(...pts.map((p) => p.c));
+  const block = rows.slice(r0, r1 + 1).map((r) => [0, 1, 2, 3].slice(c0, c1 + 1).map((j) => r[j] || ""));
+  const q = (x: string) => (/[\t\n"]/.test(x) ? `"${x.replace(/"/g, '""')}"` : x);
+  const esc = (x: string) => x.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\n/g, "<br>");
+  e.clipboardData.setData("text/plain", block.map((r) => r.map(q).join("\t")).join("\n"));
+  e.clipboardData.setData("text/html", `<table>${block.map((r) => `<tr>${r.map((x) => `<td>${esc(x)}</td>`).join("")}</tr>`).join("")}</table>`);
+  e.preventDefault();
+}
+
+/** Top 5 GBP reviews — kept apart from the sheet so "Copy for Google Sheet" stays exactly like the original layout. */
+function ReviewsCard({ f, onSave, copy, copied }: { f: CField | undefined; onSave: (p: Partial<CField>) => void; copy: (t: string, w: string) => void; copied: string }) {
+  if (!f) return null;
+  const items = f.value.split(/\n\s*\n/).map((x) => x.trim()).filter(Boolean);
+  const textOf = (x: string) => x.match(/^"([\s\S]*)"(?:\s*—[^"]*)?$/)?.[1] ?? x;
+  return (
+    <div className="card stack" style={{ boxShadow: "none" }}>
+      <div className="row between">
+        <div>
+          <h3 style={{ margin: 0 }}>Top 5 GBP Reviews <StatusBadge s={f.status} onClick={() => onSave({ status: f.status === "ok" ? "review" : "ok" })} /></h3>
+          <div className="muted small">Positive Google reviews picked for similar length so they look even on the website. Not part of the Google Sheet copy.</div>
+        </div>
+        <button className="sm" disabled={!f.value} onClick={() => copy(f.value, "reviews")}>{copied === "reviews" ? "✓ Copied" : "Copy reviews"}</button>
+      </div>
+      {items.length > 0 && (
+        <ol className="small" style={{ margin: 0, paddingLeft: 20 }}>
+          {items.map((x, i) => (
+            <li key={i} style={{ marginBottom: 6 }}>
+              <span style={{ whiteSpace: "pre-wrap" }}>{x}</span> <span className="muted">({textOf(x).length} characters)</span>
+              <button className="sm ghost" style={{ marginLeft: 6 }} onClick={() => copy(x, `rev${i}`)}>{copied === `rev${i}` ? "✓" : "Copy"}</button>
+            </li>
+          ))}
+        </ol>
+      )}
+      <details>
+        <summary className="small muted">Edit reviews</summary>
+        <AutoText value={f.value} rows={6} onSave={(v) => onSave({ value: v })} placeholder={'"Review text" — Name (blank line between reviews)'} />
+      </details>
+      {f.note && <div className="muted small" style={{ whiteSpace: "pre-wrap" }}>{f.note}</div>}
     </div>
   );
 }

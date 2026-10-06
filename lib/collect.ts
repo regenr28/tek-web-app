@@ -375,7 +375,7 @@ export function sheetRows(c: Collection): string[][] {
   const push = (label: string, f: CField | { value: string; note: string }) => rows.push([label, f.value, f.note, ""]);
   const tail = () => {
     rows.push(["", "I will send a new prompt", "", ""]);
-    for (const k of ["template", "date", "jiraUrl", "editorUrl", "reviews"] as FieldKey[]) push(FIELDS.find((f) => f.key === k)!.label, v(k));
+    for (const k of ["template", "date", "jiraUrl", "editorUrl"] as FieldKey[]) push(FIELDS.find((f) => f.key === k)!.label, v(k));
   };
   if (!c.locations.length) {
     for (const f of FIELDS) { if (f.key === "template") break; push(f.label, v(f.key)); }

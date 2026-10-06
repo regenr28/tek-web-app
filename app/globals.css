@@ -142,3 +142,10 @@ table.dc tr.dc-ok td:first-child { box-shadow: inset 3px 0 0 var(--ok); }
 label.dropzone { display: block; }
 table.sheet td { border-right: 1px solid var(--border); vertical-align: top; max-width: 420px; }
 table.sheet th { text-align: center; }
+
+/* Sheet layout: row numbers / column letters can't be highlighted, so a manual copy only grabs the cells */
+.noselect, .noselect * { -webkit-user-select: none; user-select: none; }
+table.sheet th[data-col]::before { content: attr(data-col); }
+table.sheet tbody { counter-reset: sheetrow; }
+table.sheet tbody tr { counter-increment: sheetrow; }
+table.sheet td.rownum::before { content: counter(sheetrow); }

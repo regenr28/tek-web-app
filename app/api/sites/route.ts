@@ -11,6 +11,7 @@ export const GET = handle(async () => {
            u.name AS assignee_name, (s.facts_json IS NOT NULL) AS has_facts,
            r.started_at AS last_run_at, r.status AS last_run_status, r.page_count,
            (SELECT COUNT(*) FROM findings f WHERE f.site_id = s.id AND f.status = 'open') AS open_count,
+           (SELECT j.status FROM jobs j WHERE j.site_id = s.id ORDER BY j.id DESC LIMIT 1) AS job_status,
            (SELECT COUNT(*) FROM findings f WHERE f.site_id = s.id AND f.status = 'open' AND f.severity = 'error') AS error_count,
            (SELECT COUNT(*) FROM findings f WHERE f.site_id = s.id AND f.status = 'done') AS done_count
     FROM sites s

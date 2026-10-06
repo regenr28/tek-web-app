@@ -65,6 +65,8 @@ export const MSO_LABELS: Partial<Record<FieldKey, string>> = {
 };
 
 export type Collection = {
+  /** The social links that are really in the Jira export (url + which location). The only links ever labelled "from Jira". */
+  jiraSocials?: { url: string; loc: number }[];
   locations: Loc[];
   fields: Record<FieldKey, CField>;
   pages: string[];
@@ -208,6 +210,11 @@ export function certsMentioned(text: string): string[] {
 
 // ---------- Jira → first draft ----------
 
+/** Social links exactly as written in the Jira export's "Social Links" field. */
+export function jiraSocialLinks(f: JiraFields): string[] {
+  return uniqLines(splitLines(pick(f, /^Social Links$/i)).filter((s) => /^https?:\/\//i.test(s) || /\.(com|net|org)/i.test(s)));
+}
+
 export function fromJira(jira: JiraProject, f: JiraFields, opts: { minAmenities: number; editorUrl?: string }): Collection {
   const c = emptyCollection();
   c.minAmenities = opts.minAmenities;
@@ -241,8 +248,9 @@ export function fromJira(jira: JiraProject, f: JiraFields, opts: { minAmenities:
   if (dom) set("domain", F(domainOf(dom), "jira"));
   else if (cur) set("domain", F(domainOf(cur), "rule", "review", "No domain given in Jira — using their current website's domain."));
 
-  const socials = uniqLines(splitLines(pick(f, /^Social Links$/i)).filter((s) => /^https?:\/\//i.test(s) || /\.(com|net|org)/i.test(s)));
-  set("socials", F(socials.join("\n\n"), "jira", "review", socials.length ? "Search found accounts will be added during research." : "No social links in Jira — research will look for them."));
+  const socials = jiraSocialLinks(f);
+  set("socials", F(socials.join("\n\n"), socials.length ? "jira" : "", "review", socials.length ? "Search found accounts will be added during research." : "No social links in Jira — research will look for them."));
+  c.jiraSocials = socials.map((url) => ({ url, loc: 0 }));
 
   const services = uniqLines(splitLines(pick(f, /^Primary Services$/i)).map(titleCase));
   set("services", F(services.join("\n"), "jira", services.length >= c.minServices ? "ok" : "review",
@@ -319,6 +327,8 @@ export function fromJira(jira: JiraProject, f: JiraFields, opts: { minAmenities:
       const unassigned = socialsAll.filter((u) => !addrs.some((x) => { const t = parseCityState(x).city.toLowerCase().replace(/[^a-z]/g, ""); return t && u.toLowerCase().replace(/[^a-z]/g, "").includes(t); }));
       const list = i === 0 ? [...mine, ...unassigned] : mine;
       lf.socials = F(uniqLines(list).join("\n\n"), list.length ? "jira" : "", "review", list.length ? "" : "Research will look for this location's Facebook/Yelp/etc.");
+      if (i === 0) c.jiraSocials = [];
+      for (const url of uniqLines(list)) c.jiraSocials!.push({ url, loc: i });
       c.locations.push(L);
     }
     set("cityState", F(combinedCityState(c.locations), "jira", "review"));
@@ -363,6 +373,19 @@ export function dropClosedDays(h: string) {
   return kept.length && kept.length < parts.length ? kept.join(" | ") : h;
 }
 
+/** One topic per paragraph: every note line separated by a blank line, exact repeats removed. */
+export function readableNote(n: string) {
+  const seen = new Set<string>();
+  return n.split(/\r?\n/).map((l) => l.trim()).filter((l) => { if (!l || seen.has(l.toLowerCase())) return false; seen.add(l.toLowerCase()); return true; }).join("\n\n");
+}
+/** Notes are stored one topic per line; this is the copy sent to the browser (blank line between topics). */
+export function forClient(c: Collection): Collection {
+  const x: Collection = JSON.parse(JSON.stringify(c));
+  for (const f of Object.values(x.fields)) f.note = readableNote(f.note);
+  for (const L of x.locations) for (const f of Object.values(L.fields)) f.note = readableNote(f.note);
+  return x;
+}
+
 export const splitLinesKeep = (s: string) => s.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
 export const joinNote = (a: string, b: string) => (a.includes(b) ? a : [a, b].filter(Boolean).join("\n"));
 
@@ -372,7 +395,7 @@ export const joinNote = (a: string, b: string) => (a.includes(b) ? a : [a, b].fi
 export function sheetRows(c: Collection): string[][] {
   const rows: string[][] = [["Please use the details below for my prompt that I'm going to enter:", "", "", INSPECTION_STATES.join(", "), "State Inspection"]];
   const v = (k: FieldKey) => c.fields[k];
-  const push = (label: string, f: CField | { value: string; note: string }) => rows.push([label, f.value, f.note, ""]);
+  const push = (label: string, f: CField | { value: string; note: string }) => rows.push([label, f.value, readableNote(f.note), ""]);
   const tail = () => {
     rows.push(["", "I will send a new prompt", "", ""]);
     for (const k of ["template", "date", "jiraUrl", "editorUrl"] as FieldKey[]) push(FIELDS.find((f) => f.key === k)!.label, v(k));
@@ -389,7 +412,7 @@ export function sheetRows(c: Collection): string[][] {
       for (const lf of LOC_FIELDS) {
         const f = L.fields[lf.key];
         const note = lf.key === "gbpName" ? [L.city && L.state ? `${L.city}, ${L.state}` : "", f.note].filter(Boolean).join(" — ") : f.note;
-        rows.push([`${lf.label} ${n}:`, f.value, note, ""]);
+        rows.push([`${lf.label} ${n}:`, f.value, readableNote(note), ""]);
       }
     });
     const shared: FieldKey[] = ["businessType", "existingWebsite", "domain", "services", "vehicles", "coupons", "warranties", "financing", "certifications", "about", "faq", "amenities", "specialNotes"];

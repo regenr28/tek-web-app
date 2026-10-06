@@ -3,7 +3,7 @@ import { run } from "@/lib/db";
 import { handle, requireUser } from "@/lib/auth";
 import { idOf, type Ctx } from "@/lib/http";
 import { parseBody } from "@/lib/security";
-import { FIELDS, LOC_FIELDS, PER_LOCATION, MSO_LABELS, toSheetTsv, toPlainText, sheetRows, newLocation, combinedCityState, checkPhone, type FieldKey, type LocKey } from "@/lib/collect";
+import { FIELDS, LOC_FIELDS, PER_LOCATION, MSO_LABELS, toSheetTsv, toPlainText, sheetRows, newLocation, combinedCityState, checkPhone, forClient, type FieldKey, type LocKey } from "@/lib/collect";
 import { HttpError } from "@/lib/security";
 import { loadProject, saveProject, dudaSiteId, PREVIEW_HOST } from "@/lib/projects";
 import { STEPS } from "@/lib/research";
@@ -17,7 +17,7 @@ export const GET = handle(async (_req: Request, ctx: Ctx) => {
   const p = await loadProject(id);
   const ev = p.evidence;
   return Response.json({
-    collection: p.collection,
+    collection: forClient(p.collection),
     // the Top 5 reviews live in their own section (not part of the Google Sheet copy)
     labels: (p.collection.locations.length ? FIELDS.filter((f) => !PER_LOCATION.includes(f.key)).map((f) => ({ ...f, label: MSO_LABELS[f.key] || f.label })) : [...FIELDS]).filter((f) => f.key !== "reviews"),
     locLabels: LOC_FIELDS,
@@ -71,7 +71,7 @@ export const PUT = handle(async (req: Request, ctx: Ctx) => {
       }
       f.value = val; f.manual = true; f.source = "manual"; f.status = st;
     }
-    if (v.note !== undefined) f.note = v.note;
+    if (v.note !== undefined) f.note = v.note.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).join("\n");
     if (v.status) f.status = v.status;
   };
   const stateOf = (cs: string) => cs.split(",").pop()?.trim().slice(0, 2).toUpperCase() || "";
@@ -120,5 +120,5 @@ export const PUT = handle(async (req: Request, ctx: Ctx) => {
     }
   }
   await saveProject(id, c);
-  return Response.json({ ok: true, collection: c, tsv: toSheetTsv(c), text: toPlainText(c), rows: sheetRows(c) });
+  return Response.json({ ok: true, collection: forClient(c), tsv: toSheetTsv(c), text: toPlainText(c), rows: sheetRows(c) });
 });

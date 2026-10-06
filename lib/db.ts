@@ -120,6 +120,21 @@ const SCHEMA = [
     detail TEXT
   )`,
   `CREATE INDEX IF NOT EXISTS security_events_at ON security_events(at)`,
+  // Background research runs (keep going when the person leaves the page)
+  `CREATE TABLE IF NOT EXISTS jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    site_id INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+    steps TEXT NOT NULL,
+    idx INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'queued',
+    log TEXT NOT NULL DEFAULT '[]',
+    token_hash TEXT NOT NULL,
+    lease_until INTEGER NOT NULL DEFAULT 0,
+    user_id INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`,
+  `CREATE INDEX IF NOT EXISTS jobs_site ON jobs(site_id, id)`,
 ];
 
 // Columns added after the first release. Each is applied once if missing.

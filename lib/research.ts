@@ -5,7 +5,7 @@ import { mapsSearch, webSearch, searchAvailable, placeReviews, type Place, type 
 import { callAI, parseJson, groqBrowserSearch } from "./ai";
 import {
   type Collection, type FieldKey, type CField, type Source, FIELDS, LOC_FIELDS, PER_LOCATION, applyRules, joinNote, splitLinesKeep, uniqLines, titleCase,
-  parseCityState, stripCountry, checkPhone, domainOf, websiteUrl, certsMentioned, dropClosedDays,
+  parseCityState, stripCountry, checkPhone, domainOf, websiteUrl, certsMentioned, dropClosedDays, INSPECTION_STATES,
 } from "./collect";
 
 /**
@@ -25,7 +25,11 @@ export type Evidence = {
   reviews?: { key: string; provider: string; all: Review[]; at: string };
   years?: { established: string; experience: string; quote: string; url: string; via: string; at: string };
   crosscheck?: CrossCheck;
+  /** Social profiles found on their website (via "website") or confirmed by search (via "search"). Rebuilt each run. */
+  socialFinds?: SocialFind[];
+  socialRejected?: string[];
 };
+export type SocialFind = { url: string; reason: string; loc: number; via: "website" | "search"; rating?: number; review?: boolean };
 
 export type ListingRow = { source: string; url: string; name: string; phone: string; address: string; website: string; read: "data" | "page" | "ai" | "search" | "none"; marks: { name?: string; phone?: string; address?: string; website?: string } };
 export type CrossCheck = { at: string; rows: ListingRow[]; issues: string[] };
@@ -493,7 +497,7 @@ function pageText($: cheerio.CheerioAPI) {
 
 export async function stepWebsite(c: Collection, ev: Evidence): Promise<string> {
   const start = c.fields.existingWebsite.value || (ev.gbp?.place?.website ? websiteUrl(ev.gbp.place.website) : "");
-  if (!start) { ev.website = undefined; return "Skipped — no existing website"; }
+  if (!start) { ev.website = undefined; ev.socialFinds = (ev.socialFinds || []).filter((f) => f.via !== "website"); composeSocials(c, ev); return "Skipped — no existing website"; }
   const get = async (u: string) => {
     const r = await safeFetch(u, { hosts: "public", headers: { "User-Agent": UA, Accept: "text/html" }, timeoutMs: 15000, maxBytes: 3_000_000 });
     return { status: r.status, url: r.url, html: /html|text/i.test(r.headers.get("content-type") || "text/html") ? r.text() : "" };
@@ -579,14 +583,17 @@ export async function stepWebsite(c: Collection, ev: Evidence): Promise<string> 
       note: fits && brandMatch ? `Decision: using their current domain ${d} (matches the shop name).` : `Decision needed: current domain ${d} doesn't clearly match "${c.fields.shopName.value}" — confirm with the client before using it.` });
   }
 
-  addSocialsSmart(c, [...socials], "website", `linked on their website (${domainOf(home.url)})`);
+  ev.socialFinds = [
+    ...(ev.socialFinds || []).filter((f) => f.via !== "website"),
+    ...[...socials].map((u) => ({ url: u, reason: `linked on their website (${home.url})`, loc: Math.max(0, locationIndexFor(c, u)), via: "website" as const })),
+  ];
   const certs = certsMentioned(pages.map((p) => p.text).join(" "));
   const have = c.fields.certifications.value.toLowerCase();
   const newCerts = certs.filter((x) => !have.includes(x.toLowerCase()));
   if (newCerts.length) patch(c, "certifications", { note: `Their website also mentions: ${newCerts.join(", ")} (not added — confirm).`, source: "website", status: "review" });
   if (signals.warranty.length && (!c.fields.warranties.value.trim() || c.fields.warranties.source !== "jira") && !c.fields.warranties.manual)
     patch(c, "warranties", { note: `Their website mentions: ${signals.warranty.slice(0, 3).join(" · ")}`, source: "website", status: "review" });
-  tidySocials(c);
+  composeSocials(c, ev);
   return `Read ${pages.length} page(s) from ${domainOf(home.url)}${signals.warranty.length ? " · warranty text found" : ""}`;
 }
 
@@ -638,60 +645,54 @@ export function cleanSocials(lines: string[]) {
   return { list: [...out.map((o) => o.clean), ...other], extras, skipped };
 }
 
-/** Adds a "• Platform: reason" line (one per platform) to a socials note. */
-function setReason(f: CField, platform: string, reason: string) {
-  const lines = f.note.split("\n").filter((l) => !l.startsWith(`• ${platform}:`));
-  const at = lines.findIndex((l) => l.startsWith("• "));
-  const line = `• ${platform}: ${reason}`;
-  if (at >= 0) lines.splice(at, 0, line); else lines.unshift(line);
-  f.note = lines.filter(Boolean).join("\n");
-}
+/** Lines this code writes in a socials note (rewritten on every run; anything else in the note is kept). */
+const SOCIAL_NOTE_LINE = /^(• |Not added — couldn't confirm|Also found \(not added|Yelp rating unknown|Skipped Yelp|No social links in Jira|None of the Jira links|Search found accounts will be added|Research will look for this location|Found on their website|Found by web search|Found by Groq AI search|Removed — )/;
 
-function addSocials(c: Collection, urls: string[], source: Source, why: string, ratingByUrl: Record<string, number | undefined> = {}, target?: CField, review = false, reasons: Record<string, string> = {}) {
-  const tf = target || c.fields.socials;
-  const cur = splitLinesKeep(tf.value);
-  const incoming: string[] = [];
-  for (const u of urls) {
-    if (platformOf(u) === "Yelp") {
-      const r = ratingByUrl[u];
-      if (r != null && r < 4) { patchField(tf, { note: `Skipped Yelp (${r}★, below 4★): ${profileOf(u)?.clean || u}`, source }); continue; }
-      if (r == null && profileOf(u)) patchField(tf, { note: `Yelp rating unknown for ${profileOf(u)!.clean} — make sure it's 4★ or higher.`, source, status: "review" });
+/**
+ * Rebuilds every social list from proven sources only — never from what happened to be in the field before:
+ *  1. links that are really in the Jira export ("Social Links"),
+ *  2. links on the shop's own website,
+ *  3. search finds whose listing shows this shop's phone / street / ZIP / city + state.
+ * Each link gets a note saying exactly where it came from. Lists the person edited by hand are left alone.
+ */
+function composeSocials(c: Collection, ev: Evidence) {
+  const targets = c.locations.length ? c.locations.map((L) => L.fields.socials) : [c.fields.socials];
+  const at = (i: number) => Math.max(0, Math.min(i, targets.length - 1));
+  type Item = { url: string; reason: string; rating?: number; review?: boolean; from: "jira" | "website" | "search" };
+  const buckets: Item[][] = targets.map(() => []);
+  for (const j of c.jiraSocials || []) buckets[at(j.loc)].push({ url: j.url, reason: "from Jira (the client's \"Social Links\" answer)", from: "jira" });
+  for (const f of ev.socialFinds || []) buckets[at(f.loc)].push({ url: f.url, reason: f.reason, rating: f.rating, review: f.review, from: f.via });
+  targets.forEach((tf, i) => {
+    if (tf.manual) return; // the person edited this list — don't touch it
+    const items = buckets[i];
+    const lowYelp = items.filter((x) => platformOf(x.url) === "Yelp" && x.rating != null && x.rating < 4 && x.from !== "jira");
+    const usable = items.filter((x) => !lowYelp.includes(x));
+    const res = cleanSocials(usable.map((x) => x.url));
+    const before = splitLinesKeep(tf.value).map((u) => profileOf(u)).filter(Boolean) as NonNullable<ReturnType<typeof profileOf>>[];
+    const nowKeys = new Set(res.list.map((u) => profileOf(u)?.key));
+    const removed = before.filter((p) => !nowKeys.has(p.key)).map((p) => p.clean);
+    tf.value = res.list.join("\n\n");
+    const lines: string[] = [];
+    let needsReview = false;
+    for (const u of res.list) {
+      const pf = profileOf(u);
+      if (!pf) continue;
+      const it = usable.find((x) => profileOf(x.url)?.key === pf.key)!;
+      lines.push(`• ${pf.platform}: ${it.reason}${it.rating != null ? ` · ${it.rating}★` : ""}`);
+      if (it.review) needsReview = true;
+      if (pf.platform === "Yelp" && it.rating == null) { lines.push(`Yelp rating unknown for ${pf.clean} — make sure it's 4★ or higher.`); needsReview = true; }
     }
-    incoming.push(u);
-  }
-  if (tf.manual) return; // the person edited this list — don't touch it
-  const beforeKeys = new Set(cur.map((u) => profileOf(u)?.key).filter(Boolean));
-  const res = cleanSocials([...cur, ...incoming]);
-  const added = res.list.filter((u) => { const k = profileOf(u)?.key; return k && !beforeKeys.has(k); });
-  tf.value = res.list.join("\n\n");
-  if (tf.value && !tf.source) tf.source = source;
-  tf.note = tf.note.replace(/Research will look for this location's Facebook\/Yelp\/etc\.\s*/, "").replace(/Search found accounts will be added during research\.\s*/, "").replace(/No social links in Jira — research will look for them\.\s*/, "").trim();
-  for (const u of added) {
-    const orig = incoming.find((x) => profileOf(x)?.key === profileOf(u)?.key) || u;
-    const rating = ratingByUrl[orig] != null ? ` · ${ratingByUrl[orig]}★` : "";
-    setReason(tf, platformOf(u), `${reasons[orig] || why}${rating}`);
-  }
-  if (added.length && review) tf.status = "review";
-  const extras = res.extras.filter((x) => !tf.note.includes(x));
-  if (extras.length) patchField(tf, { note: `Also found (not added — one profile per platform): ${extras.join(" · ")}`, source });
-}
-
-/** Re-cleans every social list (Jira values can contain posts or duplicates) and gives every link a reason. */
-function tidySocials(c: Collection) {
-  const fix = (f: CField) => {
-    if (f.manual || !f.value.trim()) return;
-    const res = cleanSocials(splitLinesKeep(f.value));
-    const v = res.list.join("\n\n");
-    if (v !== f.value) {
-      f.value = v;
-      if (res.extras.length) f.note = joinNote(f.note, `Also found (not added — one profile per platform): ${res.extras.join(" · ")}`);
-    }
-    f.note = f.note.replace(/Review: [^\n]*(duplicate|separator)[^\n]*\n?/gi, "").replace(/^(Found on their website|Found by web search|Found by Groq AI search[^:]*): [^\n]*\n?/gim, "").trim();
-    // links that came with the Jira form
-    for (const u of res.list) { const pl = platformOf(u); if (pl && !f.note.includes(`• ${pl}:`)) setReason(f, pl, "from Jira (provided by the client)"); }
-  };
-  fix(c.fields.socials);
-  for (const L of c.locations) fix(L.fields.socials);
+    for (const y of lowYelp) lines.push(`Skipped Yelp (${y.rating}★, below 4★): ${profileOf(y.url)?.clean || y.url}`);
+    if (res.extras.length) lines.push(`Also found (not added — one profile per platform): ${res.extras.join(" · ")}`);
+    if (removed.length) { lines.push(`Removed — not in Jira, not on their website and couldn't confirm it's this shop: ${removed.join(" · ")}`); needsReview = true; }
+    if (i === 0 && ev.socialRejected?.length) lines.push(`Not added — couldn't confirm it's this shop: ${ev.socialRejected.slice(0, 5).join(" · ")}`);
+    if (!res.list.length) lines.push(c.jiraSocials?.length ? "None of the Jira links are usable profile links." : "No social links in Jira, and none could be confirmed online.");
+    const kept = tf.note.split("\n").filter((l) => l.trim() && !SOCIAL_NOTE_LINE.test(l) && !/Review: [^\n]*(duplicate|separator)/i.test(l));
+    tf.note = [...lines, ...kept].join("\n");
+    const sources = new Set(res.list.map((u) => usable.find((x) => profileOf(x.url)?.key === profileOf(u)?.key)?.from));
+    tf.source = sources.has("jira") ? "jira" : sources.has("website") ? "website" : sources.has("search") ? "search" : "";
+    tf.status = !res.list.length || needsReview ? "review" : "ok";
+  });
 }
 
 // ---------- is this listing really this shop? ----------
@@ -735,17 +736,6 @@ function locationIndexFor(c: Collection, text: string) {
   const hits = c.locations.map((L, i) => ({ i, tok: L.city.toLowerCase().replace(/[^a-z]/g, "") })).filter((x) => x.tok.length > 2 && t.includes(x.tok));
   return hits.length === 1 ? hits[0].i : -1;
 }
-function addSocialsSmart(c: Collection, urls: string[], source: Source, why: string, ratingByUrl: Record<string, number | undefined> = {}, context: Record<string, string> = {}, review = false, reasons: Record<string, string> = {}, locHint: Record<string, number> = {}) {
-  if (!c.locations.length) return addSocials(c, urls, source, why, ratingByUrl, undefined, review, reasons);
-  const buckets = new Map<number, string[]>();
-  for (const u of urls) {
-    const i = locHint[u] >= 0 ? locHint[u] : locationIndexFor(c, `${u} ${context[u] || ""}`);
-    const idx = i >= 0 ? i : 0;
-    buckets.set(idx, [...(buckets.get(idx) || []), u]);
-  }
-  for (const [i, list] of buckets) addSocials(c, list, source, why, ratingByUrl, c.locations[i].fields.socials, review, reasons);
-}
-
 /** Opens each page (directly, or through Groq's browser when the site blocks us) and checks it shows this shop. */
 async function confirmListings(c: Collection, list: WebResult[]): Promise<Record<string, { loc: number; reason: string }>> {
   const out: Record<string, { loc: number; reason: string }> = {};
@@ -905,15 +895,12 @@ export async function stepSearch(c: Collection, ev: Evidence): Promise<string> {
     if (ok) { accepted.push(x.r); locHint[x.r.url] = ok.loc; reasons[x.r.url] = ok.reason; }
     else rejected.push(`${clean} (${x.cityOnly ? "only the city matched — could be another state" : "only the name is similar — no matching address, phone or city"})`);
   }
-  const ratingByUrl = Object.fromEntries(accepted.map((r) => [r.url, r.rating]));
-  const ctx = Object.fromEntries(accepted.map((r) => [r.url, `${r.title} ${r.snippet}`]));
-  addSocialsSmart(c, accepted.filter((r) => !r.ai).map((r) => r.url), "search", "found by web search", ratingByUrl, ctx, false, reasons, locHint);
-  addSocialsSmart(c, accepted.filter((r) => r.ai).map((r) => r.url), "search", "found by Groq AI search", ratingByUrl, ctx, true, reasons, locHint);
+  ev.socialFinds = [
+    ...(ev.socialFinds || []).filter((f) => f.via !== "search"),
+    ...accepted.map((r) => ({ url: r.url, reason: reasons[r.url], loc: locHint[r.url] ?? Math.max(0, locationIndexFor(c, `${r.url} ${r.title} ${r.snippet}`)), via: "search" as const, rating: r.rating, review: !!r.ai || /Groq/.test(reasons[r.url] || "") })),
+  ];
+  ev.socialRejected = rejected;
   const socials = accepted;
-  if (rejected.length) {
-    const tf = c.fields.socials.manual ? null : c.locations.length ? c.locations[0].fields.socials : c.fields.socials;
-    if (tf) { tf.note = tf.note.split("\n").filter((l) => !l.startsWith("Not added — couldn't confirm")).join("\n"); patchField(tf, { note: `Not added — couldn't confirm it's this shop: ${rejected.slice(0, 5).join(" · ")}`, source: "search" }); }
-  }
 
   // Certification / directory evidence
   const certHits: string[] = [];
@@ -927,7 +914,7 @@ export async function stepSearch(c: Collection, ev: Evidence): Promise<string> {
   }
   if (certHits.length) patch(c, "certifications", { note: `Found online (confirm before adding): ${certHits.slice(0, 5).join(" · ")}`, source: "search", status: "review" });
   const yrs = await findYears(c, ev, results, relevant).catch(() => "");
-  tidySocials(c);
+  composeSocials(c, ev);
   return `${results.length} results via ${provider}; ${socials.length} social profile(s) confirmed${rejected.length ? `, ${rejected.length} not added (couldn't confirm)` : ""}${yrs ? `; ${yrs}` : ""}`;
 }
 
@@ -1139,9 +1126,11 @@ ${evidenceBlock(ev, /services|amenities|about/i, 7000)}` });
     const r = A[k];
     const list = uniqLines((Array.isArray(r?.value) ? r!.value : splitLinesKeep(asText(r?.value))).map((s) => titleCase(String(s))));
     if (!list.length || c.fields[k].manual) continue;
-    const before = splitLinesKeep(c.fields[k].value);
+    const before = splitLinesKeep(c.fields[k].value).filter((x) => !/^state inspection$/i.test(x));
     const stem = (x: string) => x.toLowerCase().replace(/[^a-z0-9 ]/g, "").replace(/s\b/g, "").split(" ")[0];
     const dropped = before.filter((j) => !list.some((x) => x.toLowerCase().includes(stem(j))));
+    // each run replaces the previous run's notes instead of piling up
+    c.fields[k].note = c.fields[k].note.split("\n").filter((l) => !/^(Reworded\/moved from Jira:|Added from research:|Review:)/.test(l)).join("\n");
     c.fields[k].value = list.join("\n");
     c.fields[k].source = "ai";
     if (dropped.length) patch(c, k, { note: `Reworded/moved from Jira: ${dropped.join(", ")} — check nothing was lost.`, source: "ai", status: "review" });
@@ -1185,12 +1174,15 @@ ${evidenceBlock(ev, /coupons|warranty|financing|about|faq/i, 9000, true)}` });
     c.fields.warranties.note = c.fields.warranties.note.split("\n").filter((l) => !/no warranty (information )?(found|listed|mentioned)/i.test(l)).join("\n");
     patch(c, "warranties", { note: `Their website states: ${wSent.slice(0, 2).join(" · ")} — copy the terms into the value.`, source: "website", status: "review" });
   }
-  tidySocials(c);
+  composeSocials(c, ev);
   applyRules(c);
   return `Filled via ${[...new Set(used)].join(" + ")}`;
 }
 
 // ---------- 5. AI review ----------
+
+/** Review comments about the sheet's own formatting rules are noise — drop them. */
+const IGNORED_REVIEW = /\bwww\.?\b.*prefix|prefix.*\bwww\b|state inspection.*(not present|not in jira|adds)|hours format|day breakdown|title case|formatting differ/i;
 
 export async function stepReview(c: Collection, jiraRaw: Record<string, string>): Promise<string> {
   const sheet = FIELDS.filter((f) => !["date", "jiraUrl", "editorUrl"].includes(f.key) && !(c.locations.length && PER_LOCATION.includes(f.key))).map((f) => `${f.key}: ${c.fields[f.key].value.replace(/\n/g, "; ").slice(0, 300)}`).join("\n")
@@ -1203,8 +1195,14 @@ JIRA: ${JSON.stringify(jiraRaw).slice(0, 2500)}
 
 DATA COLLECTION:
 ${sheet}
-Required: services ≥ ${c.minServices}, amenities ≥ ${c.minAmenities}, phone "(000) 000-0000", City, ST with 2-letter state, address without country.` });
+Required: services ≥ ${c.minServices}, amenities ≥ ${c.minAmenities}, phone "(000) 000-0000", City, ST with 2-letter state, address without country.
+These are the sheet's own rules — NOT problems, never flag them: hours rewritten as "Mon–Fri: 8 AM–5 PM" (only open days); "www." on the domain; Title Case lists; "State Inspection" added for ${INSPECTION_STATES.join(", ")}; the Jira shop name kept even if the GBP adds LLC/Inc; notes that already explain a difference. One issue per field.` });
   const j = parseJson<{ issues?: { field: string; problem: string }[] }>(r.text);
+  // a new review replaces the last one (no stacked "Review:" lines)
+  const clearReview = (f: CField) => { f.note = f.note.split("\n").filter((l) => !l.startsWith("Review:")).join("\n"); };
+  Object.values(c.fields).forEach(clearReview);
+  c.locations.forEach((L) => Object.values(L.fields).forEach(clearReview));
+  const seenProblems = new Set<string>();
   let n = 0;
   for (const it of j?.issues || []) {
     const lm = String(it.field).match(/location\s*(\d+)/i);
@@ -1215,6 +1213,9 @@ Required: services ≥ ${c.minServices}, amenities ≥ ${c.minAmenities}, phone 
     }
     const k = FIELDS.find((f) => f.key === it.field)?.key;
     if (!k || !it.problem) continue;
+    const sig = `${k}:${it.problem.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 60)}`;
+    if (seenProblems.has(sig) || IGNORED_REVIEW.test(it.problem)) continue;
+    seenProblems.add(sig);
     patch(c, k, { note: `Review: ${it.problem}`, source: c.fields[k].source || "ai", status: "review" });
     n++;
   }

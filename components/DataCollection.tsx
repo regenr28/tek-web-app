@@ -31,11 +31,9 @@ export default function DataCollection({ siteId, onChanged }: { siteId: number; 
   const [d, setD] = useState<Data | null>(null);
   const [err, setErr] = useState("");
   const [running, setRunning] = useState<string>("");
-  const [log, setLog] = useState<string[]>([]);
   const [copied, setCopied] = useState("");
   const [filter, setFilter] = useState<"all" | "review">("all");
   const [view, setView] = useState<"form" | "sheet">("form");
-  const stop = useRef(false);
 
   const load = useCallback(() => api<Data>(`/api/sites/${siteId}/collection`).then(setD).catch((e) => setErr(e.message)), [siteId]);
   useEffect(() => { load(); try { const v = localStorage.getItem("dc-view"); if (v === "sheet" || v === "form") setView(v); } catch { /* ignore */ } }, [load]);
@@ -50,24 +48,40 @@ export default function DataCollection({ siteId, onChanged }: { siteId: number; 
   const saveLoc = (index: number, key: string, patch: Partial<CField>) => put({ locations: [{ index, fields: { [key]: patch } }] });
   const savePages = (text: string) => put({ pages: text.split("\n").map((x) => x.trim()).filter(Boolean) });
 
+  // Research runs on the server: it keeps going if you leave this page, and this page picks it up again when you come back.
+  type JobView = { id: number; status: string; steps: string[]; idx: number; log: { step: string; ok: boolean; summary: string }[] };
+  const [job, setJob] = useState<JobView | null>(null);
+  const seen = useRef(-1);
+  const active = (j: JobView | null) => !!j && ["queued", "running", "stopping"].includes(j.status);
+  const showJob = useCallback((j: JobView | null) => {
+    setJob(j);
+    if (!j) return;
+    setRunning(active(j) ? (j.status === "stopping" ? "Stopping after this step…" : j.steps[j.idx] || "…") : "");
+    if (j.log.length !== seen.current) { if (seen.current >= 0) { load(); onChanged(); } seen.current = j.log.length; }
+  }, [load, onChanged]);
+  useEffect(() => {
+    let alive = true, timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      try { const r = await api<{ job: JobView | null }>(`/api/sites/${siteId}/collection/job`); if (!alive) return; showJob(r.job); if (active(r.job)) timer = setTimeout(poll, 2500); }
+      catch { if (alive) timer = setTimeout(poll, 5000); }
+    };
+    if (!job || active(job)) poll();
+    return () => { alive = false; clearTimeout(timer); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [siteId, job?.id, job?.status === "queued" || job?.status === "running" || job?.status === "stopping"]);
+
   async function runSteps(ids: string[]) {
-    stop.current = false; setLog([]); setErr("");
-    for (const id of ids) {
-      if (stop.current) break;
-      const label = d?.steps.find((x) => x.id === id)?.label || id;
-      setRunning(label);
-      try {
-        const r = await api<Saved & { ok: boolean; summary: string }>(`/api/sites/${siteId}/collection/run`, { body: { step: id } });
-        merge(r);
-        setLog((l) => [...l, `${r.ok ? "✓" : "⚠"} ${label}: ${r.summary}`]);
-      } catch (e) { setLog((l) => [...l, `⚠ ${label}: ${(e as Error).message}`]); }
-    }
-    setRunning(""); load(); onChanged();
+    setErr("");
+    try { const r = await api<{ job: JobView }>(`/api/sites/${siteId}/collection/job`, { body: { steps: ids } }); seen.current = r.job.log.length; showJob(r.job); }
+    catch (e) { setErr((e as Error).message); }
   }
+  async function stopRun() { await api(`/api/sites/${siteId}/collection/job`, { body: { action: "stop" } }).catch(() => {}); setRunning("Stopping after this step…"); }
 
   const copy = async (text: string, what: string) => { await navigator.clipboard.writeText(text); setCopied(what); setTimeout(() => setCopied(""), 1500); };
 
   if (!d) return <p className="muted">{err || "Loading…"}</p>;
+  const stepLabel = (id: string) => d.steps.find((x) => x.id === id)?.label || id;
+  const log = job ? job.log.map((l) => `${l.ok ? "✓" : "⚠"} ${stepLabel(l.step)}: ${l.summary}`).concat(job.status === "stopped" ? ["■ Stopped"] : []) : [];
   const c = d.collection;
   const mso = c.locations.length > 0;
   const review = d.labels.filter((l) => c.fields[l.key]?.status !== "ok");
@@ -106,7 +120,7 @@ export default function DataCollection({ siteId, onChanged }: { siteId: number; 
             <h3 style={{ margin: 0 }}>Research</h3>
             <div className="muted small">Finds the GBP{mso ? " of every location" : ""}, reads their website, searches socials and listings, then free AI fills the gaps and double-checks everything. Jira always wins; anything found elsewhere gets a note.</div>
           </div>
-          {running ? <button onClick={() => { stop.current = true; }}>Stop after this step</button>
+          {running ? <button onClick={stopRun}>Stop after this step</button>
             : <button className="primary" disabled={!d.project} onClick={() => runSteps(d.steps.map((x) => x.id))}>Run all research</button>}
         </div>
         {(!d.available.maps || !d.available.web || !d.available.ai) && (
@@ -126,7 +140,8 @@ export default function DataCollection({ siteId, onChanged }: { siteId: number; 
             );
           })}
         </div>
-        {(running || log.length > 0) && <div className="log">{log.join("\n")}{running && `\n… ${running}`}</div>}
+        {(running || log.length > 0) && <div className="log">{log.join("\n")}{running && `\n… ${stepLabel(running)}`}</div>}
+        {running && <div className="muted small">Runs on the server — you can leave this page or close the tab; it keeps going and this page shows the progress when you come back.</div>}
       </div>
 
       {/* Two ways to use it */}

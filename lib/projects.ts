@@ -1,7 +1,7 @@
 import { one, run } from "./db";
 import { HttpError } from "./security";
 import { parseJiraXlsx, toProject, pick, type JiraFields, type JiraProject } from "./jira";
-import { fromJira, normalizeCollection, applyRules, toFacts, type Collection, FIELDS } from "./collect";
+import { fromJira, normalizeCollection, applyRules, toFacts, jiraSocialLinks, type Collection, FIELDS } from "./collect";
 import type { Evidence } from "./research";
 
 // ---------- template rules (how many amenities a template needs) ----------
@@ -51,9 +51,20 @@ export async function loadProject(id: number) {
   const r = await one<ProjectRow>("SELECT id, name, preview_url, editor_url, duda_site_id, jira_key, project_type, template, jira_json, collection_json, research_json FROM sites WHERE id = ?", [id]);
   if (!r) throw new HttpError(404, "Project not found");
   const jira = r.jira_json ? (JSON.parse(r.jira_json) as { fields: JiraFields; project: JiraProject }) : null;
+  const collection = normalizeCollection(r.collection_json ? JSON.parse(r.collection_json) : null);
+  // Projects imported before this was tracked: read the Jira social links straight from the stored export (never guess)
+  if (!collection.jiraSocials && jira) {
+    const links = jiraSocialLinks(jira.fields);
+    collection.jiraSocials = links.map((url) => {
+      if (!collection.locations.length) return { url, loc: 0 };
+      const t = url.toLowerCase().replace(/[^a-z]/g, "");
+      const i = collection.locations.findIndex((L) => L.city && t.includes(L.city.toLowerCase().replace(/[^a-z]/g, "")));
+      return { url, loc: Math.max(0, i) };
+    });
+  }
   return {
     row: r, jira,
-    collection: normalizeCollection(r.collection_json ? JSON.parse(r.collection_json) : null),
+    collection,
     evidence: (r.research_json ? JSON.parse(r.research_json) : {}) as Evidence,
   };
 }

@@ -7,7 +7,7 @@ const TYPE_SHORT: Record<string, string> = { basic: "Basic", advanced: "Advanced
 
 type SiteRow = {
   id: number; name: string; preview_url: string; jira_key: string | null; project_type: string | null; template: string | null; editor_url: string | null; status: string; assignee_id: number | null; assignee_name: string | null;
-  has_facts: number; last_run_at: string | null; page_count: number | null; open_count: number; error_count: number; done_count: number; updated_at: string;
+  has_facts: number; last_run_at: string | null; job_status: string | null; page_count: number | null; open_count: number; error_count: number; done_count: number; updated_at: string;
 };
 
 export default function Dashboard() {
@@ -25,6 +25,8 @@ export default function Dashboard() {
 
   const load = () => api<SiteRow[]>("/api/sites").then(setSites).catch((e) => setErr(e.message));
   useEffect(() => { load(); api<Member[]>("/api/users").then((m) => setMembers(m.filter((x) => x.active))); }, []);
+  const busy = (sites || []).some((s) => s.job_status && ["queued", "running", "stopping"].includes(s.job_status));
+  useEffect(() => { if (!busy) return; const t = setInterval(load, 10_000); return () => clearInterval(t); }, [busy]);
 
   const shown = useMemo(() => (sites || []).filter((s) =>
     (!q || (s.name + " " + s.preview_url + " " + (s.jira_key || "")).toLowerCase().includes(q.toLowerCase())) &&
@@ -151,6 +153,7 @@ export default function Dashboard() {
                       <Link href={`/sites/${s.id}`}><b>{s.name}</b></Link>
                       {s.jira_key && <span className="badge" style={{ marginLeft: 6 }}>{s.jira_key}</span>}
                       {s.project_type && <span className={`badge ${s.project_type === "mso" ? "warning" : s.project_type === "advanced" ? "accent" : ""}`} style={{ marginLeft: 6 }}>{TYPE_SHORT[s.project_type] || s.project_type}</span>}
+                      {s.job_status && ["queued", "running", "stopping"].includes(s.job_status) && <span className="badge accent" style={{ marginLeft: 6 }}>Researching…</span>}
                       <div className="muted small" style={{ maxWidth: 380, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.template ? `${s.template} · ` : ""}{s.preview_url || (s.editor_url ? "Editor linked" : "No Duda site yet")}</div>
                     </td>
                     <td>

@@ -3,7 +3,7 @@ import { one, run } from "@/lib/db";
 import { handle, checkPassword, createSession, burnTime, HttpError } from "@/lib/auth";
 import { parseBody, rateLimit, clientIp, logEvent } from "@/lib/security";
 
-const Body = z.object({ email: z.string().trim().toLowerCase().max(200), password: z.string().max(200) });
+const Body = z.object({ email: z.string().trim().toLowerCase().max(200), password: z.string().max(200), remember: z.boolean().optional() });
 const GENERIC = "Email or password is incorrect, or the account is temporarily locked.";
 
 type Row = { id: number; password_hash: string; active: number; mfa_enabled: number; failed_logins: number; locked_until: string | null };
@@ -11,7 +11,7 @@ type Row = { id: number; password_hash: string; active: number; mfa_enabled: num
 export const POST = handle(async (req: Request) => {
   const ip = await clientIp();
   await rateLimit(`login-ip:${ip}`, 20, 900);
-  const { email, password } = await parseBody(req, Body);
+  const { email, password, remember = false } = await parseBody(req, Body);
   await rateLimit(`login-email:${email}`, 10, 900);
 
   const u = await one<Row>("SELECT id, password_hash, active, mfa_enabled, failed_logins, locked_until FROM users WHERE email = ?", [email]);
@@ -32,12 +32,12 @@ export const POST = handle(async (req: Request) => {
   }
   await run("UPDATE users SET failed_logins = 0, locked_until = NULL WHERE id = ?", [u.id]);
   if (u.mfa_enabled) {
-    await createSession(u.id, false);
+    await createSession(u.id, false, remember); // the choice carries over to the 2FA step
     await logEvent("login.password_ok_awaiting_2fa", u.id);
     return Response.json({ mfa: true });
   }
-  await createSession(u.id, true);
+  await createSession(u.id, true, remember);
   await run("UPDATE users SET last_login_at = datetime('now') WHERE id = ?", [u.id]);
-  await logEvent("login.success", u.id, { ip });
+  await logEvent("login.success", u.id, { ip, remember });
   return Response.json({ ok: true });
 });

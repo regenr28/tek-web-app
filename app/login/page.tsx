@@ -8,6 +8,8 @@ export default function Login() {
   const [step, setStep] = useState<Step>("loading");
   const [missing, setMissing] = useState<string[]>([]);
   const [f, setF] = useState({ setupToken: "", name: "", email: "", password: "", code: "" });
+  const [remember, setRemember] = useState(true);
+  useEffect(() => { try { if (localStorage.getItem("keep-signed-in") === "0") setRemember(false); } catch { /* ignore */ } }, []);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -26,7 +28,8 @@ export default function Login() {
         return;
       }
       if (step === "login") {
-        const r = await api<{ mfa?: boolean }>("/api/auth/login", { body: { email: f.email, password: f.password } });
+        try { localStorage.setItem("keep-signed-in", remember ? "1" : "0"); } catch { /* ignore */ }
+        const r = await api<{ mfa?: boolean }>("/api/auth/login", { body: { email: f.email, password: f.password, remember } });
         setF((x) => ({ ...x, password: "" }));
         if (r.mfa) { setStep("mfa"); setBusy(false); return; }
       }
@@ -62,6 +65,12 @@ export default function Login() {
             <label className="field"><span>Password</span>
               <input type="password" required minLength={step === "setup" ? 12 : 1} maxLength={128} autoComplete={step === "setup" ? "new-password" : "current-password"} value={f.password} onChange={(e) => setF({ ...f, password: e.target.value })} />
             </label>
+            {step === "login" && (
+              <label className="row small" style={{ gap: 6 }}>
+                <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
+                Keep me signed in for 30 days on this device <span className="muted">(not on shared computers)</span>
+              </label>
+            )}
             {step === "setup" && <p className="muted small">12+ characters. A long passphrase is best. You&apos;ll set up two-factor login next.</p>}
           </>
         )}

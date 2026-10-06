@@ -10,6 +10,7 @@ const Body = z.object({
   mfaRequired: z.enum(["all", "admins", "off"]).optional(),
   sessionIdleHours: z.number().int().min(1).max(24).optional(),
   sessionMaxDays: z.number().int().min(1).max(30).optional(),
+  rememberDays: z.number().int().min(0).max(90).optional(),
   crawlHosts: z.array(Host).min(1).max(200).optional(),
 });
 

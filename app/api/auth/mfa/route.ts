@@ -34,8 +34,8 @@ export const POST = handle(async (req: Request) => {
 
   // Rotate: drop the pending session and issue a fresh full one.
   await destroySession();
-  await createSession(p.id, true);
+  await createSession(p.id, true, p.remember);
   await run("UPDATE users SET last_login_at = datetime('now') WHERE id = ?", [p.id]);
-  await logEvent("login.success", p.id, { method });
+  await logEvent("login.success", p.id, { method, remember: p.remember });
   return Response.json({ ok: true, usedRecoveryCode: method === "recovery_code" });
 });

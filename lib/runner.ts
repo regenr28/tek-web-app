@@ -4,6 +4,7 @@ import { sha256, randomToken } from "./secrets";
 import { loadProject, saveProject, jiraRaw } from "./projects";
 import { STEPS, stepGbp, stepWebsite, stepSearch, stepCrossCheck, stepAi, stepReview, type StepId } from "./research";
 import { HttpError } from "./security";
+import { generateHomepage } from "./homepage";
 
 /**
  * Research runs on the server as a "job", so it keeps going when the person leaves the page or closes the tab.
@@ -12,8 +13,11 @@ import { HttpError } from "./security";
  */
 
 export const STEP_IDS = STEPS.map((s) => s.id) as StepId[];
-export type JobLine = { step: StepId; ok: boolean; summary: string; at: string };
-export type Job = { id: number; site_id: number; steps: StepId[]; idx: number; status: "queued" | "running" | "stopping" | "stopped" | "done" | "failed"; log: JobLine[]; updated_at: string };
+/** Everything a background job can run: the research steps + writing the homepage content. */
+export type JobStep = StepId | "homepage";
+export const JOB_STEPS = [...STEP_IDS, "homepage"] as JobStep[];
+export type JobLine = { step: JobStep; ok: boolean; summary: string; at: string };
+export type Job = { id: number; site_id: number; steps: JobStep[]; idx: number; status: "queued" | "running" | "stopping" | "stopped" | "done" | "failed"; log: JobLine[]; updated_at: string };
 
 const BUDGET_MS = Number(process.env.RESEARCH_BUDGET_MS) || 120_000; // start no new step after this (a single step can take ~2.5 min with Apify)
 const LEASE_MS = 330_000;    // a run that stopped answering for this long is considered dead and can be resumed
@@ -22,7 +26,10 @@ type Row = { id: number; site_id: number; steps: string; idx: number; status: st
 const parse = (r: Row): Job => ({ id: r.id, site_id: r.site_id, steps: JSON.parse(r.steps), idx: r.idx, status: r.status as Job["status"], log: JSON.parse(r.log), updated_at: r.updated_at });
 
 /** Runs one research step on a project and saves it — keeping any edits the person made while it ran. */
-export async function runStep(siteId: number, step: StepId): Promise<{ ok: boolean; summary: string }> {
+export async function runStep(siteId: number, step: JobStep): Promise<{ ok: boolean; summary: string }> {
+  if (step === "homepage") {
+    try { return await generateHomepage(siteId); } catch (e) { return { ok: false, summary: (e as Error).message.slice(0, 300) }; }
+  }
   const p = await loadProject(siteId);
   if (!p.jira) throw new HttpError(400, "Import the Jira export first");
   const c = p.collection, ev = p.evidence;
@@ -64,7 +71,7 @@ export async function latestJob(siteId: number): Promise<(Job & { stale: boolean
 }
 
 /** Starts a run (or returns the one already going for this project). Returns the job and its hand-off token. */
-export async function createJob(siteId: number, steps: StepId[], userId: number): Promise<{ job: Job; token: string; existing: boolean }> {
+export async function createJob(siteId: number, steps: JobStep[], userId: number): Promise<{ job: Job; token: string; existing: boolean }> {
   const cur = await latestJob(siteId);
   if (cur && ["queued", "running", "stopping"].includes(cur.status) && !cur.stale) return { job: cur, token: "", existing: true };
   if (cur && cur.stale) await run("UPDATE jobs SET status = 'stopped', updated_at = datetime('now') WHERE id = ?", [cur.id]);

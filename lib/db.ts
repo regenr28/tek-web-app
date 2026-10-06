@@ -195,6 +195,8 @@ const COLUMNS: [table: string, column: string, ddl: string][] = [
   ["sites", "collection_json", "TEXT"],
   ["sites", "research_json", "TEXT"],
   ["sites", "tekmetric_id", "TEXT"],
+  ["sessions", "remember", "INTEGER NOT NULL DEFAULT 0"],
+  ["sites", "homepage_json", "TEXT"],
 ];
 
 async function migrate() {

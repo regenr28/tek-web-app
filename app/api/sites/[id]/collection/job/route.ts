@@ -3,8 +3,7 @@ import { z } from "zod";
 import { handle, requireUser } from "@/lib/auth";
 import { idOf, type Ctx } from "@/lib/http";
 import { parseBody, rateLimit } from "@/lib/security";
-import { createJob, latestJob, stopJob, runJob, rotateToken, selfBase, makeHandOff, STEP_IDS } from "@/lib/runner";
-import type { StepId } from "@/lib/research";
+import { createJob, latestJob, stopJob, runJob, rotateToken, selfBase, makeHandOff, JOB_STEPS, type JobStep } from "@/lib/runner";
 
 export const maxDuration = 300;
 
@@ -22,7 +21,7 @@ export const GET = handle(async (req: Request, ctx: Ctx) => {
 });
 
 const Body = z.union([
-  z.object({ steps: z.array(z.enum(STEP_IDS as [StepId, ...StepId[]])).min(1).max(STEP_IDS.length) }).strict(),
+  z.object({ steps: z.array(z.enum(JOB_STEPS as [JobStep, ...JobStep[]])).min(1).max(JOB_STEPS.length) }).strict(),
   z.object({ action: z.literal("stop") }).strict(),
 ]);
 

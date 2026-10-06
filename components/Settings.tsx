@@ -17,12 +17,14 @@ export default function Settings({ me, dudaApi }: { me: Me; dudaApi: boolean }) 
           {isSuper && <button className={tab === "security" ? "active" : ""} onClick={() => setTab("security")}>Security</button>}
           {isSuper && <button className={tab === "ai" ? "active" : ""} onClick={() => setTab("ai")}>AI providers</button>}
           {isAdmin && <button className={tab === "research" ? "active" : ""} onClick={() => setTab("research")}>Research</button>}
+          {isAdmin && <button className={tab === "homepage" ? "active" : ""} onClick={() => setTab("homepage")}>Homepage prompts</button>}
           {isAdmin && <button className={tab === "members" ? "active" : ""} onClick={() => setTab("members")}>Members</button>}
           <button className={tab === "duda" ? "active" : ""} onClick={() => setTab("duda")}>Duda API</button>
           {isSuper && <button className={tab === "log" ? "active" : ""} onClick={() => setTab("log")}>Security log</button>}
         </div>
         {tab === "ai" && isSuper && <AiSettings />}
         {tab === "research" && isAdmin && <ResearchSettings canEdit={isSuper} />}
+        {tab === "homepage" && isAdmin && <HomepagePrompts />}
         {tab === "members" && isAdmin && <Members me={me} />}
         {tab === "duda" && <DudaInfo enabled={dudaApi} />}
         {tab === "security" && isSuper && <SecuritySettings />}
@@ -203,7 +205,7 @@ function DudaInfo({ enabled }: { enabled: boolean }) {
   );
 }
 
-type Policy = { mfaRequired: "all" | "admins" | "off"; sessionIdleHours: number; sessionMaxDays: number; crawlHosts: string[] };
+type Policy = { mfaRequired: "all" | "admins" | "off"; sessionIdleHours: number; sessionMaxDays: number; rememberDays: number; crawlHosts: string[] };
 
 function SecuritySettings() {
   const [p, setP] = useState<Policy | null>(null);
@@ -228,6 +230,7 @@ function SecuritySettings() {
       <div className="grid2">
         <label className="field"><span>Sign out after inactivity (hours)</span><input type="number" min={1} max={24} value={p.sessionIdleHours} onChange={(e) => setP({ ...p, sessionIdleHours: Number(e.target.value) })} /></label>
         <label className="field"><span>Always sign out after (days)</span><input type="number" min={1} max={30} value={p.sessionMaxDays} onChange={(e) => setP({ ...p, sessionMaxDays: Number(e.target.value) })} /></label>
+        <label className="field"><span>&quot;Keep me signed in&quot; lasts (days, 0 = off)</span><input type="number" min={0} max={90} value={p.rememberDays} onChange={(e) => setP({ ...p, rememberDays: Number(e.target.value) })} /></label>
       </div>
       <label className="field"><span>Domains the crawler may open (one per line)</span>
         <textarea rows={7} value={hosts} onChange={(e) => setHosts(e.target.value)} className="mono" />
@@ -334,6 +337,64 @@ function ResearchSettings({ canEdit }: { canEdit: boolean }) {
       </div>
       <textarea rows={6} className="mono" value={rulesText} disabled={!canEdit} onChange={(e) => setRulesText(e.target.value)} placeholder={"Single Location Template 31 = 16\nHP Only Template 5 = 8"} />
       {canEdit && <div><button className="primary" onClick={saveRules}>Save template rules</button></div>}
+      {msg && <div className="alert">{msg}</div>}{err && <div className="alert error">{err}</div>}
+    </div>
+  );
+}
+
+type HpLib = { rules: string; prompts: { id: string; name: string; prompt: string }[]; importedAt?: string };
+/** The team's homepage prompts (one per template) and the rules added to every prompt. */
+function HomepagePrompts() {
+  const [lib, setLib] = useState<HpLib | null>(null);
+  const [err, setErr] = useState(""); const [msg, setMsg] = useState("");
+  const [open, setOpen] = useState<string | null>(null);
+  const [q, setQ] = useState("");
+  useEffect(() => { api<HpLib>("/api/settings/homepage-prompts").then(setLib).catch((e) => setErr(e.message)); }, []);
+  if (!lib) return <p className="muted">{err || "Loading…"}</p>;
+  const save = async (next: HpLib) => {
+    setErr(""); setMsg("");
+    try { setLib(await api<HpLib>("/api/settings/homepage-prompts", { method: "PUT", body: { rules: next.rules, prompts: next.prompts } })); setMsg("Saved."); } catch (e) { setErr((e as Error).message); }
+  };
+  const importFile = async (file: File) => {
+    setErr(""); setMsg("Importing…");
+    try {
+      if (!/\.xlsx$/i.test(file.name)) throw new Error("Choose the guidelines .xlsx file");
+      if (file.size > 60 * 1024 * 1024) throw new Error("That file is over 60 MB");
+      // read the workbook here in the browser and send only the "My homepage prompt" sheet (uploads are capped at 4.5 MB)
+      const { readXlsx } = await import("@/lib/xlsx");
+      const sheet = readXlsx(new Uint8Array(await file.arrayBuffer())).find((x) => /homepage prompt/i.test(x.name));
+      if (!sheet) throw new Error('No "My homepage prompt" sheet in that file');
+      const rows = sheet.rows.filter((r) => r.some((c) => c.trim())).map((r) => r.slice(0, 5)); // B = template, C = prompt, E1 = rules
+      const r = await api<HpLib>("/api/settings/homepage-prompts/import", { body: { rows } });
+      setLib(r); setMsg(`Imported ${r.prompts.length} template prompts.`);
+    }
+    catch (e) { setErr((e as Error).message); setMsg(""); }
+  };
+  const shown = lib.prompts.filter((p) => !q || p.name.toLowerCase().includes(q.toLowerCase()));
+  return (
+    <div className="stack" style={{ maxWidth: 900 }}>
+      <p className="muted small" style={{ margin: 0 }}>Each project&apos;s <b>Homepage</b> tab uses the prompt that matches its template (e.g. “HP Only - Single Location 16”, “Single Location Template 31”, “MSO Single Location 14”). Import them from your guidelines workbook (sheet <b>My homepage prompt</b>: column B = template, column C = prompt){lib.importedAt ? ` — last imported ${ago(lib.importedAt)}` : ""}.</p>
+      <label className="dropzone small"><b>Import from the guidelines .xlsx</b><div>replaces the list below</div>
+        <input type="file" hidden accept=".xlsx" onChange={(e) => { const f = e.target.files?.[0]; if (f) importFile(f); e.target.value = ""; }} />
+      </label>
+      <label className="field"><span>Rules added to every prompt</span>
+        <textarea rows={5} value={lib.rules} onChange={(e) => setLib({ ...lib, rules: e.target.value })} onBlur={() => save(lib)} />
+      </label>
+      <div className="row between"><b>{lib.prompts.length} template prompt(s)</b><input style={{ maxWidth: 240 }} placeholder="Find a template…" value={q} onChange={(e) => setQ(e.target.value)} /></div>
+      {shown.map((p) => (
+        <div key={p.id} className="card" style={{ boxShadow: "none", padding: 10 }}>
+          <div className="row between">
+            <input value={p.name} onChange={(e) => setLib({ ...lib, prompts: lib.prompts.map((x) => (x.id === p.id ? { ...x, name: e.target.value } : x)) })} onBlur={() => save(lib)} style={{ maxWidth: 380, fontWeight: 600 }} />
+            <div className="row">
+              <span className="muted small">{p.prompt.length.toLocaleString()} characters</span>
+              <button className="sm" onClick={() => setOpen(open === p.id ? null : p.id)}>{open === p.id ? "Close" : "Edit prompt"}</button>
+              <button className="sm ghost danger" onClick={() => { if (confirm(`Delete "${p.name}"?`)) save({ ...lib, prompts: lib.prompts.filter((x) => x.id !== p.id) }); }}>Delete</button>
+            </div>
+          </div>
+          {open === p.id && <textarea className="mono" rows={18} style={{ marginTop: 8 }} value={p.prompt} onChange={(e) => setLib({ ...lib, prompts: lib.prompts.map((x) => (x.id === p.id ? { ...x, prompt: e.target.value } : x)) })} onBlur={() => save(lib)} />}
+        </div>
+      ))}
+      <div><button className="sm" onClick={() => save({ ...lib, prompts: [...lib.prompts, { id: "", name: "New template prompt", prompt: "Section 1: …" }] })}>+ Add a prompt</button></div>
       {msg && <div className="alert">{msg}</div>}{err && <div className="alert error">{err}</div>}
     </div>
   );

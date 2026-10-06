@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, ago, STATUS_LABEL, STATUS_TONE, type Member } from "./api";
 import FactsEditor from "./FactsEditor";
 import DataCollection from "./DataCollection";
+import HomepageContent from "./HomepageContent";
 import { emptyFacts, normalizeFacts, type Facts } from "@/lib/facts";
 
 type Site = {
@@ -23,7 +24,7 @@ export default function SiteView({ id, me }: { id: number; me: Me }) {
   const [data, setData] = useState<{ site: Site; lastRun: Run | null; pages: PageRow[]; dudaApi: boolean; ai: boolean } | null>(null);
   const [findings, setFindings] = useState<Finding[]>([]);
   const [members, setMembers] = useState<Member[]>([]);
-  const [tab, setTab] = useState<"collection" | "findings" | "facts" | "pages" | "details" | null>(null);
+  const [tab, setTab] = useState<"collection" | "homepage" | "findings" | "facts" | "pages" | "details" | null>(null);
   const [err, setErr] = useState("");
 
   const load = useCallback(async () => {
@@ -37,7 +38,7 @@ export default function SiteView({ id, me }: { id: number; me: Me }) {
   useEffect(() => {
     if (!data || tab) return;
     const q = new URLSearchParams(window.location.search).get("tab");
-    setTab(q === "collection" || q === "findings" || q === "facts" || q === "pages" || q === "details" ? q : data.site.has_project ? "collection" : "findings");
+    setTab(q === "collection" || q === "homepage" || q === "findings" || q === "facts" || q === "pages" || q === "details" ? q : data.site.has_project ? "collection" : "findings");
   }, [data]); // eslint-disable-line
 
   if (!data) return <p className="muted">{err || "Loading…"}</p>;
@@ -78,13 +79,14 @@ export default function SiteView({ id, me }: { id: number; me: Me }) {
 
       <div className="card">
         <div className="tabs">
-          {(["collection", "findings", "facts", "pages", "details"] as const).map((t) => (
+          {(["collection", "homepage", "findings", "facts", "pages", "details"] as const).map((t) => (
             <button key={t} className={tab === t ? "active" : ""} onClick={() => setTab(t)}>
-              {t === "collection" ? "Data Collection" : t === "findings" ? `QA Audit (${open.length})` : t === "facts" ? <>QA facts {!site.facts && <span className="badge warning">missing</span>}</> : t === "pages" ? `Pages (${data.pages.length})` : "Details"}
+              {t === "collection" ? "Data Collection" : t === "homepage" ? "Homepage" : t === "findings" ? `QA Audit (${open.length})` : t === "facts" ? <>QA facts {!site.facts && <span className="badge warning">missing</span>}</> : t === "pages" ? `Pages (${data.pages.length})` : "Details"}
             </button>
           ))}
         </div>
         {tab === "collection" && <DataCollection siteId={id} onChanged={load} />}
+        {tab === "homepage" && <HomepageContent siteId={id} canManage={me.role !== "member"} />}
         {tab === "findings" && <FindingsTable siteId={id} findings={findings} members={members} me={me} reload={load} onError={setErr} />}
         {tab === "facts" && <FactsTab site={site} dudaApi={data.dudaApi} ai={data.ai} onSaved={load} onError={setErr} />}
         {tab === "pages" && <PagesTab pages={data.pages} findings={findings} />}

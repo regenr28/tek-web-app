@@ -33,13 +33,18 @@ export const burnTime = async (pw: string) => {
 
 function sqlTime(d: Date) { return d.toISOString().replace("T", " ").slice(0, 19); }
 
-/** Creates a session. mfaOk=false makes a short-lived "password OK, waiting for 2FA code" session. */
-export async function createSession(userId: number, mfaOk: boolean) {
+/**
+ * Creates a session. mfaOk=false makes a short-lived "password OK, waiting for 2FA code" session.
+ * remember=true ("Keep me signed in"): lasts policy.rememberDays and isn't ended by the inactivity timeout.
+ */
+export async function createSession(userId: number, mfaOk: boolean, remember = false) {
   const policy = await getPolicy();
+  const keep = remember && policy.rememberDays > 0;
   const token = randomToken(32);
-  const expires = mfaOk ? new Date(Date.now() + policy.sessionMaxDays * 86400_000) : new Date(Date.now() + PENDING_MINUTES * 60_000);
-  await run("INSERT INTO sessions (id, user_id, mfa_ok, expires_at, ip, user_agent) VALUES (?,?,?,?,?,?)",
-    [sha256(token), userId, mfaOk ? 1 : 0, sqlTime(expires), await clientIp(), await userAgent()]);
+  const expires = !mfaOk ? new Date(Date.now() + PENDING_MINUTES * 60_000)
+    : new Date(Date.now() + (keep ? policy.rememberDays : policy.sessionMaxDays) * 86400_000);
+  await run("INSERT INTO sessions (id, user_id, mfa_ok, expires_at, ip, user_agent, remember) VALUES (?,?,?,?,?,?,?)",
+    [sha256(token), userId, mfaOk ? 1 : 0, sqlTime(expires), await clientIp(), await userAgent(), keep ? 1 : 0]);
   (await cookies()).set(COOKIE, token, {
     httpOnly: true, secure: SECURE, sameSite: "strict", path: "/",
     maxAge: Math.floor((expires.getTime() - Date.now()) / 1000),
@@ -51,25 +56,25 @@ async function tokenHash() {
   return t && t.length >= 40 && t.length <= 64 ? sha256(t) : null;
 }
 
-type SessionRow = { sid: string; mfa_ok: number; last_seen: string } & Omit<User, "setupRequired" | "needsMfa" | "mfaRequired">;
+type SessionRow = { sid: string; mfa_ok: number; last_seen: string; remember: number } & Omit<User, "setupRequired" | "needsMfa" | "mfaRequired">;
 
 async function loadSession(): Promise<SessionRow | null> {
   const h = await tokenHash();
   if (!h) return null;
   const policy = await getPolicy();
   const s = await one<SessionRow>(
-    `SELECT s.id AS sid, s.mfa_ok, s.last_seen, u.id, u.email, u.name, u.role, u.active, u.mfa_enabled, u.must_change_password
+    `SELECT s.id AS sid, s.mfa_ok, s.last_seen, s.remember, u.id, u.email, u.name, u.role, u.active, u.mfa_enabled, u.must_change_password
      FROM sessions s JOIN users u ON u.id = s.user_id
-     WHERE s.id = ? AND s.expires_at > datetime('now') AND s.last_seen > datetime('now', ?)`,
+     WHERE s.id = ? AND s.expires_at > datetime('now') AND (s.remember = 1 OR s.last_seen > datetime('now', ?))`,
     [h, `-${policy.sessionIdleHours} hours`]
   );
   if (!s || !s.active) return null;
   return s;
 }
 
-export async function pendingSessionUser(): Promise<{ id: number; email: string } | null> {
+export async function pendingSessionUser(): Promise<{ id: number; email: string; remember: boolean } | null> {
   const s = await loadSession();
-  return s && !s.mfa_ok ? { id: s.id, email: s.email } : null;
+  return s && !s.mfa_ok ? { id: s.id, email: s.email, remember: !!s.remember } : null;
 }
 
 export async function currentUser(): Promise<User | null> {
@@ -81,7 +86,7 @@ export async function currentUser(): Promise<User | null> {
   const policy = await getPolicy();
   const mfaRequired = policy.mfaRequired === "all" || (policy.mfaRequired === "admins" && s.role !== "member");
   const needsMfa = !s.mfa_enabled && mfaRequired;
-  const { sid: _sid, mfa_ok: _m, last_seen: _l, ...u } = s;
+  const { sid: _sid, mfa_ok: _m, last_seen: _l, remember: _r, ...u } = s;
   return { ...u, needsMfa, mfaRequired, setupRequired: needsMfa || !!s.must_change_password };
 }
 

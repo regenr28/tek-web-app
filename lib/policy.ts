@@ -5,12 +5,13 @@ export type SecurityPolicy = {
   mfaRequired: MfaPolicy;
   sessionIdleHours: number;   // sign out after this much inactivity
   sessionMaxDays: number;     // hard limit regardless of activity
+  rememberDays: number;       // "Keep me signed in" lasts this long (0 = option turned off)
   crawlHosts: string[];       // preview/live hosts the crawler may fetch ("*.example.com" allowed)
 };
 
 export const DEFAULT_CRAWL_HOSTS = ["*.tekmetric.site", "*.multiscreensite.com", "*.dudaone.com", "*.duda.co", "*.mydudapreview.com"];
 
-const DEFAULTS: SecurityPolicy = { mfaRequired: "all", sessionIdleHours: 8, sessionMaxDays: 7, crawlHosts: DEFAULT_CRAWL_HOSTS };
+const DEFAULTS: SecurityPolicy = { mfaRequired: "all", sessionIdleHours: 8, sessionMaxDays: 7, rememberDays: 30, crawlHosts: DEFAULT_CRAWL_HOSTS };
 
 let cache: { at: number; v: SecurityPolicy } | null = null;
 
@@ -22,6 +23,7 @@ export async function getPolicy(): Promise<SecurityPolicy> {
     mfaRequired: (["all", "admins", "off"] as const).includes(saved.mfaRequired as MfaPolicy) ? saved.mfaRequired! : DEFAULTS.mfaRequired,
     sessionIdleHours: clamp(saved.sessionIdleHours, 1, 24, DEFAULTS.sessionIdleHours),
     sessionMaxDays: clamp(saved.sessionMaxDays, 1, 30, DEFAULTS.sessionMaxDays),
+    rememberDays: clamp(saved.rememberDays, 0, 90, DEFAULTS.rememberDays),
     crawlHosts: Array.isArray(saved.crawlHosts) && saved.crawlHosts.length ? saved.crawlHosts : DEFAULTS.crawlHosts,
   };
   cache = { at: Date.now(), v };

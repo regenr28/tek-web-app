@@ -3,7 +3,9 @@ import { all, one, run, batch } from "./db";
 import { parseCsv } from "./parse";
 import { HttpError } from "./security";
 import { sha256, randomToken } from "./secrets";
-import { checkWebsite, type Health } from "./health";
+import { checkWebsite, HEALTH_LABEL, FLAG_LABEL, type Health } from "./health";
+import { addPoint, trackIncidents, eventsFor, uptimeStats, launchStatus, DEFAULT_LAUNCH, type UptimePoint, type Incident } from "./monitor";
+import { notifyRunFinished } from "./alerts";
 
 /* ---------------- import (Duda "Export site list" CSV) ---------------- */
 
@@ -69,12 +71,27 @@ export type WebsiteRow = {
   id: number; alias: string; site_name: string; domain: string; duda_status: string; created_at: string | null; first_publish: string | null; last_publish: string | null;
   subscription: string | null; labels: string; health: Health; health_detail: string; health_flags: string; checked_at: string | null; health_changed_at: string | null; prev_health: string | null;
   domain_expires: string | null; ssl_expires: string | null; missing: number;
+  /** uptime over the last 30 days (null = not enough checks), how many checks, and the last 14 results (oldest first) */
+  uptime_pct: number | null; uptime_checks: number; recent: string[];
+  /** launch tracker: why it may not be live yet + for how many days */
+  launch_flags: string[]; launch_days: number | null;
+  /** GBP website check: ok | other | none | not_found | error (null = not checked) */
+  gbp_status: string | null; gbp_website: string | null; gbp_checked_at: string | null;
+  open_incident: string | null;
 };
+type RawRow = Omit<WebsiteRow, "recent" | "launch_flags" | "launch_days" | "gbp_status" | "gbp_website"> & { uptime_recent: string; gbp_json: string | null; billing_failed: number };
 
 export async function listWebsites(): Promise<WebsiteRow[]> {
   const meta = await importMeta();
-  const rows = await all<WebsiteRow>(`SELECT id, alias, site_name, domain, duda_status, created_at, first_publish, last_publish, subscription, labels, health, health_detail, health_flags,
-    checked_at, health_changed_at, prev_health, domain_expires, ssl_expires, CASE WHEN last_seen_import < ? THEN 1 ELSE 0 END AS missing FROM websites ORDER BY created_at DESC, id DESC`, [meta?.importId || 0]);
+  const settings = await healthSettings();
+  const raw = await all<RawRow>(`SELECT id, alias, site_name, domain, duda_status, created_at, first_publish, last_publish, subscription, labels, health, health_detail, health_flags,
+    checked_at, health_changed_at, prev_health, domain_expires, ssl_expires, CASE WHEN last_seen_import < ? THEN 1 ELSE 0 END AS missing,
+    uptime_pct, uptime_checks, uptime_recent, open_incident, gbp_json, gbp_checked_at, billing_failed FROM websites ORDER BY created_at DESC, id DESC`, [meta?.importId || 0]);
+  const rows: WebsiteRow[] = raw.map(({ uptime_recent, gbp_json, billing_failed, ...r }) => {
+    const g = parse<{ status?: string; website?: string } | null>(gbp_json, null);
+    const l = launchStatus({ ...r, billing_failed }, settings);
+    return { ...r, recent: uptime_recent ? uptime_recent.split(",") : [], launch_flags: l.flags, launch_days: l.days, gbp_status: g?.status || null, gbp_website: g?.website || null };
+  });
   // expiry warnings follow the stored dates (so a change of threshold applies without re-checking everything)
   const days = (iso: string | null) => (iso ? (Date.parse(iso) - Date.now()) / 86_400_000 : Infinity);
   for (const r of rows) {
@@ -84,6 +101,8 @@ export async function listWebsites(): Promise<WebsiteRow[]> {
     if (r.health !== "skipped" && r.health !== "unchecked") {
       const sd = days(r.ssl_expires); if (sd < 5 && sd >= 0) f.push("ssl_expiring");
       if (days(r.domain_expires) < 7) f.push("domain_expiring");
+      if (r.health === "ok" && r.gbp_status === "other") f.push("gbp_other");
+      if (r.health === "ok" && r.gbp_status === "none") f.push("gbp_none");
     }
     r.health_flags = JSON.stringify(f);
   }
@@ -96,16 +115,29 @@ export async function importMeta(): Promise<(ImportResult & { at: string }) | nu
 
 /* ---------------- checks ---------------- */
 
-type Site = { id: number; alias: string; site_name: string; domain: string; duda_status: string; health: string; rdap_checked_at: string | null; domain_expires: string | null };
+type Site = { id: number; alias: string; site_name: string; domain: string; duda_status: string; health: string; rdap_checked_at: string | null; domain_expires: string | null;
+  health_flags: string; uptime_json: string | null; incidents_json: string | null };
+const SITE_COLS = "id, alias, site_name, domain, duda_status, health, rdap_checked_at, domain_expires, health_flags, uptime_json, incidents_json";
+const parse = <T,>(s: string | null | undefined, d: T): T => { try { return s ? (JSON.parse(s) as T) : d; } catch { return d; } };
 
 export async function checkOne(id: number) {
-  const s = await one<Site>("SELECT id, alias, site_name, domain, duda_status, health, rdap_checked_at, domain_expires FROM websites WHERE id = ?", [id]);
+  const s = await one<Site>(`SELECT ${SITE_COLS} FROM websites WHERE id = ?`, [id]);
   if (!s) throw new HttpError(404, "Website not found");
   await saveCheck(s, await checkWebsite(s));
 }
 
 async function saveCheck(s: Site, r: Awaited<ReturnType<typeof checkWebsite>>) {
   const changed = s.health !== r.health && !["unchecked", "skipped"].includes(s.health);
+  // uptime history, incidents and the "What changed" feed
+  const at = new Date().toISOString();
+  const points = addPoint(parse<UptimePoint[]>(s.uptime_json, []), { t: at, h: r.health, ...(r.info.ms ? { ms: r.info.ms } : {}) });
+  const incidents = trackIncidents(parse<Incident[]>(s.incidents_json, []), s.health, r.health, r.detail, at);
+  const events = eventsFor({ health: s.health, flags: parse<string[]>(s.health_flags, []) }, { health: r.health, flags: r.flags, detail: r.detail }, HEALTH_LABEL, FLAG_LABEL);
+  if (events.length) await batch(events.map((e) => ({ sql: "INSERT INTO website_events (website_id, kind, health, title, detail) VALUES (?,?,?,?,?)", args: [s.id, e.kind, e.health, e.title.slice(0, 200), e.detail.slice(0, 500)] })));
+  const st = uptimeStats(points, 30);
+  const open = incidents.length && !incidents[incidents.length - 1].end ? incidents[incidents.length - 1].start : null;
+  await run("UPDATE websites SET uptime_json = ?, incidents_json = ?, uptime_pct = ?, uptime_checks = ?, uptime_recent = ?, open_incident = ? WHERE id = ?",
+    [JSON.stringify(points), JSON.stringify(incidents), st.pct, st.checks, points.slice(-14).map((p) => p.h).join(","), open, s.id]);
   await run(`UPDATE websites SET health = ?, health_detail = ?, health_flags = ?, health_json = ?, checked_at = datetime('now'),
       prev_health = CASE WHEN ? THEN health ELSE prev_health END, health_changed_at = CASE WHEN ? THEN datetime('now') ELSE health_changed_at END,
       rdap_checked_at = CASE WHEN ? THEN datetime('now') ELSE rdap_checked_at END, domain_expires = COALESCE(?, domain_expires), ssl_expires = COALESCE(?, ssl_expires)
@@ -159,8 +191,12 @@ export async function processRun(id: number, token: string, handOff: (id: number
     const r = await one<{ status: string; scope: string; cursor_id: number }>("SELECT status, scope, cursor_id FROM health_runs WHERE id = ?", [id]);
     if (!r) return;
     if (r.status === "stopping") { await run("UPDATE health_runs SET status = 'stopped', finished_at = datetime('now'), lease_until = 0 WHERE id = ?", [id]); return; }
-    const sites = await all<Site>(`SELECT id, alias, site_name, domain, duda_status, health, rdap_checked_at, domain_expires FROM websites WHERE id > ? AND ${scopeSql(r.scope)} ORDER BY id LIMIT ?`, [r.cursor_id, CONCURRENCY * 4]);
-    if (!sites.length) { await run("UPDATE health_runs SET status = 'done', finished_at = datetime('now'), lease_until = 0 WHERE id = ?", [id]); return; }
+    const sites = await all<Site>(`SELECT ${SITE_COLS} FROM websites WHERE id > ? AND ${scopeSql(r.scope)} ORDER BY id LIMIT ?`, [r.cursor_id, CONCURRENCY * 4]);
+    if (!sites.length) {
+      await run("UPDATE health_runs SET status = 'done', finished_at = datetime('now'), lease_until = 0 WHERE id = ?", [id]);
+      await notifyRunFinished(id).catch((e) => console.error("[websites] after-run alerts failed", e));
+      return;
+    }
     if (Date.now() - started > BUDGET_MS) {
       await run("UPDATE health_runs SET lease_until = 0 WHERE id = ?", [id]);
       await handOff(id, token).catch(() => { /* resumes on next visit */ });
@@ -181,12 +217,13 @@ export async function processRun(id: number, token: string, handOff: (id: number
 
 /* ---------------- automatic monitoring ---------------- */
 
-export type HealthSettings = { schedule: "off" | "daily" | "weekly" };
+export type HealthSettings = { schedule: "off" | "daily" | "weekly"; notLiveDays: number; tempDomainDays: number; gbpPerDay: number };
 export async function healthSettings(): Promise<HealthSettings> {
   const r = await one<{ value: string }>("SELECT value FROM settings WHERE key = 'health'");
-  return { schedule: "weekly", ...(r ? JSON.parse(r.value) : {}) };
+  return { schedule: "weekly", ...DEFAULT_LAUNCH, gbpPerDay: 0, ...(r ? JSON.parse(r.value) : {}) };
 }
-export async function saveHealthSettings(s: HealthSettings) {
+export async function saveHealthSettings(patch: Partial<HealthSettings>) {
+  const s = { ...(await healthSettings()), ...patch };
   await run("INSERT INTO settings (key, value) VALUES ('health', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [JSON.stringify(s)]);
 }
 /** Called by the daily Vercel cron: starts a full check if one is due. */

@@ -2,7 +2,7 @@ import dns from "dns";
 import tls from "tls";
 import * as cheerio from "cheerio";
 import { safeFetch, isBlockedIp } from "./net";
-import { nameSimilarity } from "./research";
+import { nameSimilarity, harvestGbp } from "./research";
 
 /**
  * Domain health check for one website: is the domain still live, still on Duda, still this shop?
@@ -28,7 +28,7 @@ export const HEALTH_LABEL: Record<Health, string> = {
 /** Order used for the overview tiles (problems first after "ok"). */
 export const HEALTH_ORDER: Health[] = ["ok", "redirect", "moved", "taken", "parked", "not_found", "error", "dns", "ssl", "down", "unchecked", "skipped"];
 
-export type Flag = "domain_expiring" | "domain_hold" | "ssl_expiring" | "slow" | "other_duda_site" | "staging_domain";
+export type Flag = "domain_expiring" | "domain_hold" | "ssl_expiring" | "slow" | "other_duda_site" | "staging_domain" | "gbp_other" | "gbp_none";
 export const FLAG_LABEL: Record<Flag, string> = {
   domain_expiring: "Domain renewal overdue or due within 7 days",
   domain_hold: "Domain is on hold / in redemption / pending delete",
@@ -36,6 +36,8 @@ export const FLAG_LABEL: Record<Flag, string> = {
   slow: "Slow — took over 5 seconds",
   other_duda_site: "Domain shows a different Duda site (another alias)",
   staging_domain: "Still on a staging address (no custom domain)",
+  gbp_other: "Google Business Profile links to a different website",
+  gbp_none: "Google Business Profile has no website link",
 };
 
 export type CheckResult = {
@@ -44,6 +46,8 @@ export type CheckResult = {
     url: string; finalUrl?: string; status?: number; ms?: number; chain: { status: number; from: string; to: string }[];
     dns?: { a: string[]; cname: string[]; error?: string };
     platform?: string; dudaAlias?: string; title?: string;
+    /** what the homepage says about the shop — used (for free) to find its Google Business Profile */
+    page?: { phone?: string; address?: string; gbp?: { cid: string; placeId: string; title: string } };
     ssl?: { validTo?: string; issuer?: string; error?: string };
     rdap?: { expires?: string; status?: string[]; registrar?: string; error?: string; retry?: boolean };
     error?: string;
@@ -141,6 +145,24 @@ async function rdapInfo(domain: string): Promise<{ expires?: string; status?: st
   } catch (e) { return { error: (e as Error).message.slice(0, 120), retry: true }; }
 }
 
+/** Shop phone, address and Google Maps link from the homepage (no extra requests). */
+export function pageHints(html: string, url: string): NonNullable<CheckResult["info"]["page"]> {
+  const out: NonNullable<CheckResult["info"]["page"]> = {};
+  if (!html) return out;
+  const $ = cheerio.load(html);
+  const tel = $('a[href^="tel:"]').map((_, a) => ($(a).attr("href") || "").replace(/\D/g, "").replace(/^1(?=\d{10}$)/, "")).get().find((d) => d.length === 10);
+  if (tel) out.phone = tel;
+  $("script,style,noscript,svg").remove();
+  const text = $("body").text().replace(/\s+/g, " ");
+  const addr = text.match(/\b\d{2,6}\s+[A-Za-z0-9 .'#-]{3,60}?,?\s+[A-Za-z .'-]{2,40},?\s+(?:[A-Z]{2}|[A-Z][a-z]+(?: [A-Z][a-z]+)?)\.?,?\s+(?:\d{5}(?:-\d{4})?|[A-Z]\d[A-Z]\s?\d[A-Z]\d)\b/);
+  if (addr) out.address = addr[0].trim().slice(0, 160);
+  try {
+    const g = harvestGbp(html, url).found.find((x) => x.cid || x.placeId);
+    if (g) out.gbp = { cid: g.cid, placeId: g.placeId, title: g.title.slice(0, 120) };
+  } catch { /* ignore */ }
+  return out;
+}
+
 export async function checkWebsite(site: { domain: string; site_name: string; alias: string; rdap_checked_at?: string | null; domain_expires?: string | null }, opts: { rdap?: boolean } = {}): Promise<CheckResult> {
   const host = site.domain.toLowerCase().replace(/^https?:\/\//, "").replace(/[/?#].*$/, "");
   const shop = shopNameFromSite(site.site_name);
@@ -203,6 +225,7 @@ export async function checkWebsite(site: { domain: string; site_name: string; al
   const html = /html|text|^$/i.test(res.headers.get("content-type") || "") ? res.text() : "";
   const $ = cheerio.load(html);
   info.title = ($("title").first().text() || $('meta[property="og:site_name"]').attr("content") || "").replace(/\s+/g, " ").trim().slice(0, 140);
+  info.page = pageHints(html, res.url);
   const isDuda = DUDA.test(html);
   info.dudaAlias = html.match(/SiteAlias\s*[:=]\s*['"]([0-9a-z]{6,12})['"]/i)?.[1] || html.match(/"siteAlias"\s*:\s*"([0-9a-z]{6,12})"/i)?.[1];
   info.platform = isDuda ? "Duda" : PLATFORMS.find(([, re]) => re.test(html) || re.test(res!.headers.get("x-powered-by") || ""))?.[0] || "unknown";

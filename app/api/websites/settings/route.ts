@@ -6,7 +6,12 @@ import { saveHealthSettings, healthSettings } from "@/lib/websites";
 /** How often all domains are checked automatically. */
 export const PUT = handle(async (req: Request) => {
   const me = await requireUser("admin", { area: "websites" });
-  const b = await parseBody(req, z.object({ schedule: z.enum(["off", "daily", "weekly"]) }).strict());
+  const b = await parseBody(req, z.object({
+    schedule: z.enum(["off", "daily", "weekly"]).optional(),
+    notLiveDays: z.number().int().min(1).max(365).optional(),
+    tempDomainDays: z.number().int().min(1).max(365).optional(),
+    gbpPerDay: z.number().int().min(0).max(200).optional(),
+  }).strict());
   await saveHealthSettings(b);
   await logEvent("websites.schedule", me.id, b);
   return Response.json(await healthSettings());

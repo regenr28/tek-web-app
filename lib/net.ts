@@ -51,7 +51,7 @@ export type SafeOpts = {
   hosts: string[] | "public";
   method?: "GET" | "POST";
   headers?: Record<string, string>;
-  body?: string;
+  body?: string | Uint8Array;
   timeoutMs?: number;
   maxBytes?: number;
   maxRedirects?: number;

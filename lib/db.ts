@@ -233,6 +233,9 @@ const COLUMNS: [table: string, column: string, ddl: string][] = [
   ["websites", "uptime_checks", "INTEGER NOT NULL DEFAULT 0"],
   ["websites", "uptime_recent", "TEXT NOT NULL DEFAULT ''"],
   ["websites", "open_incident", "TEXT"],
+  // site history chart: when a site that had been live stopped being published / left Duda's export (seen on import)
+  ["websites", "unpublished_at", "TEXT"],
+  ["websites", "removed_at", "TEXT"],
 ];
 
 async function migrate() {

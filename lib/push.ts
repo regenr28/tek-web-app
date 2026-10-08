@@ -22,7 +22,8 @@ export function validEndpoint(endpoint: string) {
   } catch { return false; }
 }
 
-type Vapid = { publicKey: string; privateJwk: crypto.JsonWebKey };
+/** publicKey: raw P-256 point (base64url) for the browser; privatePem: PKCS#8 PEM used to sign. */
+type Vapid = { publicKey: string; privatePem: string };
 let cached: Vapid | null = null;
 
 /** The app's VAPID key pair (created on first use). publicKey = the browser's applicationServerKey. */
@@ -31,9 +32,10 @@ export async function vapid(): Promise<Vapid> {
   const read = async () => { const r = await one<{ value: string }>("SELECT value FROM settings WHERE key = 'vapid'"); return r ? (JSON.parse(decrypt(r.value)) as Vapid) : null; };
   let v = await read();
   if (!v) {
-    const { privateKey } = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
-    const jwk = privateKey.export({ format: "jwk" });
-    const fresh: Vapid = { publicKey: b64u(Buffer.concat([Buffer.from([4]), fromB64u(jwk.x!), fromB64u(jwk.y!)])), privateJwk: jwk };
+    const { publicKey, privateKey } = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+    // the last 65 bytes of a P-256 SPKI key are the uncompressed point (0x04 || x || y) the browser needs
+    const spki = publicKey.export({ type: "spki", format: "der" });
+    const fresh: Vapid = { publicKey: b64u(spki.subarray(spki.length - 65)), privatePem: String(privateKey.export({ type: "pkcs8", format: "pem" })) };
     await run("INSERT INTO settings (key, value) VALUES ('vapid', ?) ON CONFLICT(key) DO NOTHING", [encrypt(JSON.stringify(fresh))]);
     v = (await read()) || fresh; // another request may have created it first
   }
@@ -42,11 +44,11 @@ export async function vapid(): Promise<Vapid> {
 }
 
 /** ES256 JWT for the push service (RFC 8292). */
-export function vapidJwt(audience: string, subject: string, privateJwk: crypto.JsonWebKey, now = Date.now()) {
+export function vapidJwt(audience: string, subject: string, privatePem: string, now = Date.now()) {
   const enc = (o: object) => b64u(Buffer.from(JSON.stringify(o)));
   const head = enc({ typ: "JWT", alg: "ES256" });
   const body = enc({ aud: audience, exp: Math.floor(now / 1000) + 12 * 3600, sub: subject });
-  const key = crypto.createPrivateKey({ key: privateJwk, format: "jwk" });
+  const key = crypto.createPrivateKey(privatePem);
   const sig = crypto.sign("sha256", Buffer.from(`${head}.${body}`), { key, dsaEncoding: "ieee-p1363" });
   return `${head}.${body}.${b64u(sig)}`;
 }
@@ -84,7 +86,7 @@ export type PushMessage = { title: string; body: string; url?: string; tag?: str
 export async function sendPush(sub: PushSub, msg: PushMessage, subject: string): Promise<number> {
   if (!validEndpoint(sub.endpoint)) return 410;
   const v = await vapid();
-  const jwt = vapidJwt(new URL(sub.endpoint).origin, subject, v.privateJwk);
+  const jwt = vapidJwt(new URL(sub.endpoint).origin, subject, v.privatePem);
   const body = encryptPayload(Buffer.from(JSON.stringify(msg)), sub.p256dh, sub.auth);
   const r = await safeFetch(sub.endpoint, {
     hosts: PUSH_HOSTS, method: "POST", body, timeoutMs: 15000, maxBytes: 100_000, maxRedirects: 0,

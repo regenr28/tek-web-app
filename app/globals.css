@@ -149,3 +149,9 @@ table.sheet th[data-col]::before { content: attr(data-col); }
 table.sheet tbody { counter-reset: sheetrow; }
 table.sheet tbody tr { counter-increment: sheetrow; }
 table.sheet td.rownum::before { content: counter(sheetrow); }
+
+/* Charts: categorical series (validated light on #fff and dark on #171a21, all pairs) */
+.viz { --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a; --grid: #eceef2; }
+@media (prefers-color-scheme: dark) { .viz { --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --grid: #262b35; } }
+.viz-tip { position: absolute; pointer-events: none; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; box-shadow: 0 4px 14px rgba(0,0,0,.12); font-size: 12px; white-space: nowrap; z-index: 5; }
+.viz-key { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }

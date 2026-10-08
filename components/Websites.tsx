@@ -1,6 +1,7 @@
 "use client";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, ago } from "./api";
+import SitesHistory from "./SitesHistory";
 
 type Row = {
   id: number; alias: string; site_name: string; domain: string; duda_status: string; created_at: string | null; first_publish: string | null; last_publish: string | null;
@@ -8,6 +9,7 @@ type Row = {
   domain_expires: string | null; ssl_expires: string | null; missing: number;
   uptime_pct: number | null; uptime_checks: number; recent: string[]; launch_flags: string[]; launch_days: number | null;
   gbp_status: string | null; gbp_website: string | null; gbp_checked_at: string | null; open_incident: string | null;
+  unpublished_at: string | null; removed_at: string | null;
 };
 type Run = { id: number; status: string; scope: string; total: number; done: number; started_by: string | null; started_at: string; finished_at: string | null };
 type Data = {
@@ -76,6 +78,8 @@ export default function Websites() {
     };
   }, [d]);
   const [moreOpen, setMoreOpen] = useState(false);
+  const [showHistory, setShowHistory] = useState(() => { try { return localStorage.getItem("ws-history") === "1"; } catch { return false; } });
+  const flipHistory = () => setShowHistory((v) => { try { localStorage.setItem("ws-history", v ? "0" : "1"); } catch { /* ignore */ } return !v; });
 
   // every filter except health/warning (so the tiles show counts for the current selection)
   const base = useMemo(() => (d?.rows || []).filter((r) => {
@@ -212,8 +216,10 @@ export default function Websites() {
         {tile("attention", "Needs attention", counts.attention, "warning", "Live, but with a warning (renewal overdue, different Duda site, slow, changed, not in latest import)")}
         {tile("unchecked", "Not checked", counts.unchecked, "", "Not checked yet, or not published in Duda")}
         {tile("launch", "Launch tracker", counts.launch, counts.launch ? "warning" : "", `Paid for but maybe not really live: not published ${d.settings.notLiveDays}+ days after creation, or published but only on the temporary tekmetric.site address for ${d.settings.tempDomainDays}+ days, or Duda billing failed`)}
+        <button className="stat" onClick={flipHistory} title="Sites created, first published and unpublished for good — per week, month or year" style={{ textAlign: "left", cursor: "pointer", minWidth: 150, border: showHistory ? "2px solid var(--accent)" : "2px solid transparent" }}><b>📈</b><span>{showHistory ? "Hide history" : "History chart"}</span></button>
         {counts.avgUptime !== null && <div className="stat" title="Average uptime of the checked sites over the last 30 days (from the scheduled checks)" style={{ minWidth: 150 }}><b style={{ color: counts.avgUptime >= 99 ? "var(--ok)" : "var(--warning)" }}>{counts.avgUptime}%</b><span>Avg uptime (30 days)</span></div>}
       </div>
+      {showHistory && <SitesHistory rows={base} />}
       {f.group === "launch" && (
         <div className="row small" style={{ flexWrap: "wrap", gap: 6 }}>
           <span className="muted">Why:</span>

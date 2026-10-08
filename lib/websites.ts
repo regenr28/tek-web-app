@@ -50,7 +50,9 @@ export async function importSiteList(text: string, refresh: boolean): Promise<Im
       skipped++;
       if (refresh) {
         refreshed++;
-        stmts.push({ sql: `UPDATE websites SET site_name=?, external_uid=?, domain=?, duda_status=?, created_at=?, first_publish=?, last_publish=?, auto_renew=?, next_renewal=?, subscription=?, billing_failed=?, labels=?, refreshed_at=datetime('now'), last_seen_import=? WHERE alias=?`, args: [...vals, importId, alias] });
+        // unpublished_at: the first import that shows a previously published site as not published (SQLite reads the old duda_status here)
+        stmts.push({ sql: `UPDATE websites SET unpublished_at = CASE WHEN ? = 'PUBLISHED' THEN NULL WHEN duda_status = 'PUBLISHED' THEN datetime('now') ELSE unpublished_at END,
+          site_name=?, external_uid=?, domain=?, duda_status=?, created_at=?, first_publish=?, last_publish=?, auto_renew=?, next_renewal=?, subscription=?, billing_failed=?, labels=?, refreshed_at=datetime('now'), last_seen_import=? WHERE alias=?`, args: [vals[3], ...vals, importId, alias] });
       } else stmts.push({ sql: "UPDATE websites SET last_seen_import = ? WHERE alias = ?", args: [importId, alias] });
     } else {
       added++;
@@ -59,6 +61,9 @@ export async function importSiteList(text: string, refresh: boolean): Promise<Im
     }
   }
   for (let i = 0; i < stmts.length; i += 400) await batch(stmts.slice(i, i + 400));
+  // sites no longer in Duda's export: remember when they disappeared (and clear it if they come back)
+  await run("UPDATE websites SET removed_at = datetime('now') WHERE last_seen_import < ? AND removed_at IS NULL", [importId]);
+  await run("UPDATE websites SET removed_at = NULL WHERE last_seen_import = ? AND removed_at IS NOT NULL", [importId]);
   const missing = (await one<{ n: number }>("SELECT COUNT(*) AS n FROM websites WHERE last_seen_import < ?", [importId]))?.n || 0;
   const result = { importId, total: rows.length - 1, added, skipped, refreshed, invalid: invalid.slice(0, 20), missing };
   await run("INSERT INTO settings (key, value) VALUES ('websites_import', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [JSON.stringify({ ...result, at: new Date().toISOString() })]);
@@ -78,6 +83,7 @@ export type WebsiteRow = {
   /** GBP website check: ok | other | none | not_found | error (null = not checked) */
   gbp_status: string | null; gbp_website: string | null; gbp_checked_at: string | null;
   open_incident: string | null;
+  unpublished_at: string | null; removed_at: string | null;
 };
 type RawRow = Omit<WebsiteRow, "recent" | "launch_flags" | "launch_days" | "gbp_status" | "gbp_website"> & { uptime_recent: string; gbp_json: string | null; billing_failed: number };
 
@@ -86,7 +92,7 @@ export async function listWebsites(): Promise<WebsiteRow[]> {
   const settings = await healthSettings();
   const raw = await all<RawRow>(`SELECT id, alias, site_name, domain, duda_status, created_at, first_publish, last_publish, subscription, labels, health, health_detail, health_flags,
     checked_at, health_changed_at, prev_health, domain_expires, ssl_expires, CASE WHEN last_seen_import < ? THEN 1 ELSE 0 END AS missing,
-    uptime_pct, uptime_checks, uptime_recent, open_incident, gbp_json, gbp_checked_at, billing_failed FROM websites ORDER BY created_at DESC, id DESC`, [meta?.importId || 0]);
+    uptime_pct, uptime_checks, uptime_recent, open_incident, gbp_json, gbp_checked_at, billing_failed, unpublished_at, removed_at FROM websites ORDER BY created_at DESC, id DESC`, [meta?.importId || 0]);
   const rows: WebsiteRow[] = raw.map(({ uptime_recent, gbp_json, billing_failed, ...r }) => {
     const g = parse<{ status?: string; website?: string } | null>(gbp_json, null);
     const l = launchStatus({ ...r, billing_failed }, settings);

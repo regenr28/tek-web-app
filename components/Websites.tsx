@@ -35,6 +35,18 @@ function Strip({ list, size = 8, title }: { list: string[]; size?: number; title
 type Filters = { q: string; status: string; group: Group; problem: string; warning: string; launch?: string; labels: string[]; labelMode: "any" | "all"; template: string; domainType: string; createdFrom: string; createdTo: string; firstFrom: string; firstTo: string; lastFrom: string; lastTo: string };
 const EMPTY: Filters = { q: "", status: "", group: "", problem: "", warning: "", labels: [], labelMode: "any", template: "", domainType: "", createdFrom: "", createdTo: "", firstFrom: "", firstTo: "", lastFrom: "", lastTo: "" };
 const isTemplate = (l: string) => /^\d{1,3}$/.test(l);
+/** The filters in use, in words (shown on the history chart and in its PDF / Excel). */
+function describeFilters(f: Filters) {
+  const parts: string[] = [];
+  if (f.q) parts.push(`search “${f.q}”`);
+  if (f.status) parts.push(`Duda status ${f.status.toLowerCase()}`);
+  if (f.labels.length) parts.push(`labels ${f.labels.join(f.labelMode === "all" ? " + " : " or ")}`);
+  if (f.template) parts.push(`template ${f.template}`);
+  if (f.domainType) parts.push(f.domainType === "custom" ? "custom domains only" : "staging domains only");
+  const range = (n: string, a: string, b: string) => { if (a || b) parts.push(`${n} ${a || "…"} to ${b || "…"}`); };
+  range("created", f.createdFrom, f.createdTo); range("first published", f.firstFrom, f.firstTo); range("last published", f.lastFrom, f.lastTo);
+  return parts.join(" · ");
+}
 
 export default function Websites() {
   const [d, setD] = useState<Data | null>(null);
@@ -219,7 +231,7 @@ export default function Websites() {
         <button className="stat" onClick={flipHistory} title="Sites created, first published and unpublished for good — per week, month or year" style={{ textAlign: "left", cursor: "pointer", minWidth: 150, border: showHistory ? "2px solid var(--accent)" : "2px solid transparent" }}><b>📈</b><span>{showHistory ? "Hide history" : "History chart"}</span></button>
         {counts.avgUptime !== null && <div className="stat" title="Average uptime of the checked sites over the last 30 days (from the scheduled checks)" style={{ minWidth: 150 }}><b style={{ color: counts.avgUptime >= 99 ? "var(--ok)" : "var(--warning)" }}>{counts.avgUptime}%</b><span>Avg uptime (30 days)</span></div>}
       </div>
-      {showHistory && <SitesHistory rows={base} />}
+      {showHistory && <SitesHistory rows={base} filters={describeFilters(f)} />}
       {f.group === "launch" && (
         <div className="row small" style={{ flexWrap: "wrap", gap: 6 }}>
           <span className="muted">Why:</span>

@@ -8,7 +8,7 @@ import { dudaEnabled } from "@/lib/duda";
 import { aiAvailable } from "@/lib/ai";
 
 export const GET = handle(async (_req: Request, ctx: Ctx) => {
-  await requireUser();
+  await requireUser("member", { area: "projects" });
   const id = await idOf(ctx);
   const s = await one<Record<string, unknown> & { facts_json: string | null; last_run_id: number | null }>("SELECT * FROM sites WHERE id = ?", [id]);
   if (!s) throw new HttpError(404, "Site not found");
@@ -22,7 +22,7 @@ export const GET = handle(async (_req: Request, ctx: Ctx) => {
 });
 
 export const PATCH = handle(async (req: Request, ctx: Ctx) => {
-  await requireUser();
+  await requireUser("member", { area: "projects" });
   const id = await idOf(ctx);
   const b = await parseBody(req, SitePatch);
   if (b.preview_url) await assertCrawlable(b.preview_url);
@@ -38,7 +38,7 @@ export const PATCH = handle(async (req: Request, ctx: Ctx) => {
 });
 
 export const DELETE = handle(async (_req: Request, ctx: Ctx) => {
-  await requireUser("admin");
+  await requireUser("admin", { area: "projects" });
   const id = await idOf(ctx);
   for (const t of ["findings", "pages", "runs"]) await run(`DELETE FROM ${t} WHERE site_id = ?`, [id]);
   await run("DELETE FROM sites WHERE id = ?", [id]);

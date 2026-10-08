@@ -6,7 +6,7 @@ import { finishRun } from "@/lib/audit";
 
 export const maxDuration = 60;
 export const POST = handle(async (req: Request, ctx: Ctx) => {
-  await requireUser();
+  await requireUser("member", { area: "projects" });
   const { runId } = await parseBody(req, z.object({ runId: z.number().int().positive() }));
   return Response.json(await finishRun(await idOf(ctx), runId));
 });

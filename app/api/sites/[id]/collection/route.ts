@@ -12,7 +12,7 @@ import { aiAvailable } from "@/lib/ai";
 import { TYPE_LABEL } from "@/lib/jira";
 
 export const GET = handle(async (_req: Request, ctx: Ctx) => {
-  await requireUser();
+  await requireUser("member", { area: "projects" });
   const id = await idOf(ctx);
   const p = await loadProject(id);
   const ev = p.evidence;
@@ -30,7 +30,9 @@ export const GET = handle(async (_req: Request, ctx: Ctx) => {
     evidence: {
       gbpLocs: (ev.gbpLocs || []).map((g) => g ? { provider: g.provider, title: g.place?.title, address: g.place?.address, rating: g.place?.rating, reviews: g.place?.reviews, hours: g.place?.hours, at: g.at } : null),
       gbp: ev.gbp ? { provider: ev.gbp.provider, title: ev.gbp.place?.title, address: ev.gbp.place?.address, rating: ev.gbp.place?.rating, reviews: ev.gbp.place?.reviews, hours: ev.gbp.place?.hours, at: ev.gbp.at } : null,
-      website: ev.website ? { url: ev.website.finalUrl, pages: ev.website.pages.filter((x) => /^https?:\/\//i.test(x.url)).map((x) => ({ url: x.url, title: x.title })), signals: ev.website.signals, at: ev.website.at } : null,
+      website: ev.website ? { url: ev.website.finalUrl, pages: ev.website.pages.filter((x) => /^https?:\/\//i.test(x.url)).map((x) => ({ url: x.url, title: x.title })), signals: ev.website.signals, at: ev.website.at,
+        urls: (ev.website.urls || []).filter((u) => /^https?:\/\//i.test(u)) } : null,
+      programs: (ev.programs || []).map((p) => ({ ...p, url: /^https?:\/\//i.test(p.url) ? p.url : "" })),
       crosscheck: ev.crosscheck ? { at: ev.crosscheck.at, issues: ev.crosscheck.issues, rows: ev.crosscheck.rows.map((r) => ({ ...r, url: /^https?:\/\//i.test(r.url) ? r.url : "" })) } : null,
       search: ev.search ? { provider: ev.search.provider, queries: ev.search.queries, results: ev.search.results.filter((r) => /^https?:\/\//i.test(r.url)).slice(0, 25).map((r) => ({ title: r.title, url: r.url })), at: ev.search.at } : null,
     },
@@ -55,7 +57,7 @@ const Body = z.object({
 }).strict();
 
 export const PUT = handle(async (req: Request, ctx: Ctx) => {
-  await requireUser();
+  await requireUser("member", { area: "projects" });
   const id = await idOf(ctx);
   const b = await parseBody(req, Body);
   const p = await loadProject(id);

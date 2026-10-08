@@ -8,8 +8,12 @@ import { getPolicy } from "./policy";
 export { HttpError };
 
 export type Role = "super_admin" | "admin" | "member";
+/** Which main areas a non-Super-Admin may open. Super Admins always see everything. */
+export type Access = "all" | "projects" | "websites";
+export type Area = "projects" | "websites";
+export const ACCESS_VALUES = ["all", "projects", "websites"] as const;
 export type User = {
-  id: number; email: string; name: string; role: Role; active: number;
+  id: number; email: string; name: string; role: Role; active: number; access: Access;
   mfa_enabled: number; must_change_password: number;
   /** true when the user must change their password or turn on 2FA before using the app */
   setupRequired: boolean; needsMfa: boolean; mfaRequired: boolean;
@@ -63,7 +67,7 @@ async function loadSession(): Promise<SessionRow | null> {
   if (!h) return null;
   const policy = await getPolicy();
   const s = await one<SessionRow>(
-    `SELECT s.id AS sid, s.mfa_ok, s.last_seen, s.remember, u.id, u.email, u.name, u.role, u.active, u.mfa_enabled, u.must_change_password
+    `SELECT s.id AS sid, s.mfa_ok, s.last_seen, s.remember, u.id, u.email, u.name, u.role, u.active, u.access, u.mfa_enabled, u.must_change_password
      FROM sessions s JOIN users u ON u.id = s.user_id
      WHERE s.id = ? AND s.expires_at > datetime('now') AND (s.remember = 1 OR s.last_seen > datetime('now', ?))`,
     [h, `-${policy.sessionIdleHours} hours`]
@@ -107,12 +111,24 @@ export async function currentSessionId() { return tokenHash(); }
 
 export const hasRole = (u: User | null, role: Role) => !!u && RANK[u.role] >= RANK[role];
 
+/** Effective access: Super Admins always see everything; unknown values fall back to "all". */
+export const accessOf = (u: Pick<User, "role" | "access">): Access =>
+  u.role === "super_admin" ? "all" : (ACCESS_VALUES as readonly string[]).includes(u.access) ? u.access : "all";
+export const canSee = (u: Pick<User, "role" | "access"> | null, area: Area) => {
+  if (!u) return false;
+  const a = accessOf(u);
+  return a === "all" || a === area;
+};
+/** Where to send someone who opened an area they can't see. */
+export const homeFor = (u: Pick<User, "role" | "access">) => (canSee(u, "projects") ? "/" : "/websites");
+
 /** Every protected API calls this. `setup: true` lets users with unfinished security setup reach their own account endpoints. */
-export async function requireUser(role: Role = "member", opts: { setup?: boolean } = {}): Promise<User> {
+export async function requireUser(role: Role = "member", opts: { setup?: boolean; area?: Area } = {}): Promise<User> {
   const u = await currentUser();
   if (!u) throw new HttpError(401, "Not signed in");
   if (u.setupRequired && !opts.setup) throw new HttpError(403, "Finish your account security setup first", "setup_required");
   if (!hasRole(u, role)) throw new HttpError(403, "You don't have permission for this");
+  if (opts.area && !canSee(u, opts.area)) throw new HttpError(403, "Your account doesn't have access to this area");
   return u;
 }
 

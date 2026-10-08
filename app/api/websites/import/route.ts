@@ -7,7 +7,7 @@ export const maxDuration = 60;
 
 /** Import Duda's "Export site list" CSV. New Site Aliases are added; existing ones are never added twice. */
 export const POST = handle(async (req: Request) => {
-  const me = await requireUser("admin");
+  const me = await requireUser("admin", { area: "websites" });
   await rateLimit(`websites-import:${me.id}`, 30, 3600);
   if (Number(req.headers.get("content-length") || 0) > 4.5 * 1024 * 1024) throw new HttpError(413, "File is larger than 4 MB");
   const form = await req.formData();

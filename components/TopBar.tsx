@@ -3,15 +3,15 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { api } from "./api";
 
-export default function TopBar({ me, limited }: { me: { name: string; role: string }; limited?: boolean }) {
+export default function TopBar({ me, limited, projects = true, websites = true }: { me: { name: string; role: string }; limited?: boolean; projects?: boolean; websites?: boolean }) {
   const path = usePathname();
   const logout = async () => { await api("/api/auth/logout", { body: {} }).catch(() => {}); window.location.href = "/login"; };
   return (
     <header className="topbar">
-      <Link href="/" className="brand"><span className="brand-dot" /> <span>Duda Preview Audit</span></Link>
+      <Link href={projects ? "/" : "/websites"} className="brand"><span className="brand-dot" /> <span>Duda Preview Audit</span></Link>
       <nav>
-        {!limited && <Link href="/" className={path === "/" ? "active" : ""}>Projects</Link>}
-        {!limited && <Link href="/websites" className={path.startsWith("/websites") ? "active" : ""}>All Websites</Link>}
+        {!limited && projects && <Link href="/" className={path === "/" ? "active" : ""}>Projects</Link>}
+        {!limited && websites && <Link href="/websites" className={path.startsWith("/websites") ? "active" : ""}>All Websites</Link>}
         {!limited && <Link href="/settings" className={path.startsWith("/settings") ? "active" : ""}>Settings</Link>}
         <Link href="/account" className={path.startsWith("/account") ? "active" : ""}>My account</Link>
       </nav>

@@ -10,7 +10,7 @@ export const maxDuration = 60;
 
 /** Parses a Jira export and returns suggested facts. Nothing is saved until the user reviews and clicks Save. */
 export const POST = handle(async (req: Request, ctx: Ctx) => {
-  const me = await requireUser();
+  const me = await requireUser("member", { area: "projects" });
   await idOf(ctx);
   await rateLimit(`import:${me.id}`, 60, 3600);
   if (Number(req.headers.get("content-length") || 0) > 4.5 * 1024 * 1024) throw new HttpError(413, "Upload is larger than 4 MB");

@@ -11,7 +11,7 @@ export const maxDuration = 300; // Apify GBP lookups can take up to ~2.5 minutes
 
 /** Runs one research step right away (the page uses background jobs; this stays for scripts/tests). */
 export const POST = handle(async (req: Request, ctx: Ctx) => {
-  const me = await requireUser();
+  const me = await requireUser("member", { area: "projects" });
   await rateLimit(`research:${me.id}`, 200, 3600);
   const { step } = await parseBody(req, z.object({ step: z.enum(STEP_IDS as [StepId, ...StepId[]]) }));
   const id = await idOf(ctx);

@@ -5,7 +5,7 @@ import { SiteCreate, assertCrawlable } from "@/lib/validators";
 import { guessSiteName } from "@/lib/duda";
 
 export const GET = handle(async () => {
-  await requireUser();
+  await requireUser("member", { area: "projects" });
   const rows = await all(`
     SELECT s.id, s.name, s.preview_url, s.live_url, s.jira_key, s.status, s.assignee_id, s.updated_at, s.project_type, s.template, s.editor_url,
            u.name AS assignee_name, (s.facts_json IS NOT NULL) AS has_facts,
@@ -22,7 +22,7 @@ export const GET = handle(async () => {
 });
 
 export const POST = handle(async (req: Request) => {
-  const me = await requireUser();
+  const me = await requireUser("member", { area: "projects" });
   await rateLimit(`site-create:${me.id}`, 200, 3600);
   const b = await parseBody(req, SiteCreate);
   if (b.preview_url) await assertCrawlable(b.preview_url);

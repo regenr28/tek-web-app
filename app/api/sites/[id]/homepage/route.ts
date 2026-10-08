@@ -20,7 +20,7 @@ async function view(siteId: number, st?: HpState) {
 
 /** Homepage content for a project: the generated versions + which template prompt to use. */
 export const GET = handle(async (_req: Request, ctx: Ctx) => {
-  await requireUser();
+  await requireUser("member", { area: "projects" });
   return Response.json(await view(await idOf(ctx)));
 });
 
@@ -32,7 +32,7 @@ const Body = z.object({
 
 /** Pick the prompt, switch version, or edit one line. */
 export const PUT = handle(async (req: Request, ctx: Ctx) => {
-  await requireUser();
+  await requireUser("member", { area: "projects" });
   const id = await idOf(ctx);
   const b = await parseBody(req, Body);
   const st = await getState(id);

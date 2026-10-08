@@ -9,7 +9,7 @@ export const maxDuration = 300;
 
 /** Progress of the latest research run for this project (resumes a run whose hand-off was lost). */
 export const GET = handle(async (req: Request, ctx: Ctx) => {
-  await requireUser();
+  await requireUser("member", { area: "projects" });
   const id = await idOf(ctx);
   const job = await latestJob(id);
   if (job?.stale) {
@@ -27,7 +27,7 @@ const Body = z.union([
 
 /** Start research in the background ({steps}) or stop it after the current step ({action:"stop"}). */
 export const POST = handle(async (req: Request, ctx: Ctx) => {
-  const me = await requireUser();
+  const me = await requireUser("member", { area: "projects" });
   const id = await idOf(ctx);
   const b = await parseBody(req, Body);
   if ("action" in b) { await stopJob(id); return Response.json({ ok: true }); }

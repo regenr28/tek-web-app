@@ -8,7 +8,7 @@ export const maxDuration = 30;
 
 /** Report as CSV — the rows currently shown (ids from the page's filters), or everything. */
 export const POST = handle(async (req: Request) => {
-  await requireUser();
+  await requireUser("member", { area: "websites" });
   const { ids } = await parseBody(req, z.object({ ids: z.array(z.number().int().positive()).max(50000).optional() }).strict());
   let rows = await listWebsites();
   if (ids) { const set = new Set(ids); rows = rows.filter((r) => set.has(r.id)); }

@@ -9,7 +9,7 @@ export const maxDuration = 60;
 const Body = z.object({ runId: z.number().int().positive(), pageId: z.number().int().positive(), kind: z.enum(["copy", "alt"]), includeGlobal: z.boolean().default(false) });
 
 export const POST = handle(async (req: Request, ctx: Ctx) => {
-  const me = await requireUser();
+  const me = await requireUser("member", { area: "projects" });
   await rateLimit(`ai:${me.id}`, 400, 3600);
   const { runId, pageId, kind, includeGlobal } = await parseBody(req, Body);
   try {

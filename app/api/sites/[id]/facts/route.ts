@@ -9,7 +9,7 @@ import { normalizeFacts } from "@/lib/facts";
 const Body = z.object({ facts: FactsSchema, source: z.string().max(200).optional(), rawText: z.string().max(60000).optional() });
 
 export const PUT = handle(async (req: Request, ctx: Ctx) => {
-  await requireUser();
+  await requireUser("member", { area: "projects" });
   const id = await idOf(ctx);
   const { facts, source, rawText } = await parseBody(req, Body);
   const f = normalizeFacts(facts);

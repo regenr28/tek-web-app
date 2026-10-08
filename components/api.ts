@@ -14,7 +14,7 @@ export async function api<T = unknown>(url: string, opts: { method?: string; bod
   if (!r.ok) throw new Error((j as { error?: string }).error || `Request failed (${r.status})`);
   return j as T;
 }
-export type Member = { id: number; name: string; email: string; role: string; active: number };
+export type Member = { id: number; name: string; email: string; role: string; active: number; access?: string };
 export const STATUS_LABEL: Record<string, string> = {
   not_started: "Not started", in_progress: "In progress", needs_fixes: "Needs fixes", fixed: "Fixed – recheck", passed: "Passed QA", published: "Published",
 };

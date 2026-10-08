@@ -5,7 +5,7 @@ import { mapsSearch, webSearch, searchAvailable, placeReviews, type Place, type 
 import { callAI, parseJson, groqBrowserSearch } from "./ai";
 import {
   type Collection, type FieldKey, type CField, type Source, FIELDS, LOC_FIELDS, PER_LOCATION, applyRules, joinNote, splitLinesKeep, uniqLines, titleCase,
-  parseCityState, stripCountry, checkPhone, domainOf, websiteUrl, certsMentioned, dropClosedDays, INSPECTION_STATES,
+  parseCityState, stripCountry, checkPhone, domainOf, websiteUrl, certsMentioned, dropClosedDays, INSPECTION_STATES, REGION_NAMES,
 } from "./collect";
 
 /**
@@ -755,7 +755,7 @@ function composeSocials(c: Collection, ev: Evidence) {
 
 // ---------- is this listing really this shop? ----------
 
-const STATE_NAMES: Record<string, string> = { AL: "Alabama", AK: "Alaska", AZ: "Arizona", AR: "Arkansas", CA: "California", CO: "Colorado", CT: "Connecticut", DE: "Delaware", DC: "District of Columbia", FL: "Florida", GA: "Georgia", HI: "Hawaii", ID: "Idaho", IL: "Illinois", IN: "Indiana", IA: "Iowa", KS: "Kansas", KY: "Kentucky", LA: "Louisiana", ME: "Maine", MD: "Maryland", MA: "Massachusetts", MI: "Michigan", MN: "Minnesota", MS: "Mississippi", MO: "Missouri", MT: "Montana", NE: "Nebraska", NV: "Nevada", NH: "New Hampshire", NJ: "New Jersey", NM: "New Mexico", NY: "New York", NC: "North Carolina", ND: "North Dakota", OH: "Ohio", OK: "Oklahoma", OR: "Oregon", PA: "Pennsylvania", RI: "Rhode Island", SC: "South Carolina", SD: "South Dakota", TN: "Tennessee", TX: "Texas", UT: "Utah", VT: "Vermont", VA: "Virginia", WA: "Washington", WV: "West Virginia", WI: "Wisconsin", WY: "Wyoming", PR: "Puerto Rico" };
+const STATE_NAMES: Record<string, string> = REGION_NAMES;
 type LocInfo = { city: string; state: string; phone: string; address: string };
 function locInfos(c: Collection): LocInfo[] {
   if (c.locations.length) return c.locations.map((L) => ({ city: L.city, state: L.state, phone: L.fields.phone.value, address: L.fields.address.value }));
@@ -1140,7 +1140,7 @@ export async function stepPrograms(c: Collection, ev: Evidence): Promise<string>
 // ---------- 4. Cross-check every listing (GBP, website, Facebook, Yelp, …) ----------
 
 const PHONE_RE = /(?:\+?1[\s.-]?)?\(?\b([2-9]\d{2})\)?[\s.-]?(\d{3})[\s.-]?(\d{4})\b/g;
-const ADDR_RE = /\b\d{2,6}\s+[A-Za-z0-9 .'-]{3,60}?,?\s+[A-Za-z .'-]{2,40},?\s+[A-Z]{2}\s+\d{5}\b/;
+const ADDR_RE = /\b\d{2,6}\s+[A-Za-z0-9 .'-]{3,60}?,?\s+[A-Za-z .'-]{2,40},?\s+[A-Z]{2}\s+(\d{5}\b|[A-Z]\d[A-Z]\s?\d[A-Z]\d\b)/;
 /** The "123 Street, City, ST 12345" in a text (so "Highway 16 Auto Repair. 1713 N NC 16 …" gives the real street, not "16 Auto…"). */
 function findAddress(text: string): string {
   const sticky = new RegExp(ADDR_RE.source.replace(/^\\b/, ""), "y");

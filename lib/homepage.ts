@@ -4,7 +4,7 @@ import { isZip, assertSafeZip } from "./parse";
 import { HttpError } from "./security";
 import { callAI, parseJson } from "./ai";
 import { loadProject } from "./projects";
-import { toPlainText, type Collection } from "./collect";
+import { toPlainText, REGION_NAMES, type Collection } from "./collect";
 import { randomToken, sha256 } from "./secrets";
 import BUILTIN from "./data/homepage-prompts.json";
 import { getPromptState, defaultServices } from "./prompts";
@@ -189,8 +189,7 @@ function ruleIssues(sections: HpSection[], c: Collection): string[] {
   }
   return out;
 }
-const STATES: Record<string, string> = { AL: "Alabama", AK: "Alaska", AZ: "Arizona", AR: "Arkansas", CA: "California", CO: "Colorado", CT: "Connecticut", DE: "Delaware", FL: "Florida", GA: "Georgia", HI: "Hawaii", ID: "Idaho", IL: "Illinois", IN: "Indiana", IA: "Iowa", KS: "Kansas", KY: "Kentucky", LA: "Louisiana", ME: "Maine", MD: "Maryland", MA: "Massachusetts", MI: "Michigan", MN: "Minnesota", MS: "Mississippi", MO: "Missouri", MT: "Montana", NE: "Nebraska", NV: "Nevada", NH: "New Hampshire", NJ: "New Jersey", NM: "New Mexico", NY: "New York", NC: "North Carolina", ND: "North Dakota", OH: "Ohio", OK: "Oklahoma", OR: "Oregon", PA: "Pennsylvania", RI: "Rhode Island", SC: "South Carolina", SD: "South Dakota", TN: "Tennessee", TX: "Texas", UT: "Utah", VT: "Vermont", VA: "Virginia", WA: "Washington", WV: "West Virginia", WI: "Wisconsin", WY: "Wyoming" };
-const stateName = (st: string) => STATES[st.toUpperCase()] || st;
+const stateName = (st: string) => REGION_NAMES[st.toUpperCase()] || st;
 
 /* ---------------- generate ---------------- */
 

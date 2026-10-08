@@ -2,7 +2,7 @@ import * as cheerio from "cheerio";
 import { one, run } from "./db";
 import { callAI, parseJson } from "./ai";
 import { loadProject, type ProjectRow } from "./projects";
-import { splitLinesKeep, toPlainText, type Collection } from "./collect";
+import { splitLinesKeep, toPlainText, REGION_NAMES, type Collection } from "./collect";
 import { HttpError } from "./security";
 import { safeFetch } from "./net";
 import { UA, resolveDudaUrl, scopeFor, canonical, pagePath, scoped } from "./crawl";
@@ -339,11 +339,14 @@ async function ask(user: string, maxTokens = 4000) {
 }
 const words = (s: string) => (s.match(/[A-Za-z0-9’'-]+/g) || []).length;
 const sentences = (s: string) => s.split(/(?<=[.!?])\s+(?=[A-Z0-9"“])/).filter((x) => x.trim()).length;
+const US_CODES = new Set(Object.keys(REGION_NAMES).filter((k) => !["AB", "BC", "MB", "NB", "NL", "NS", "NT", "NU", "ON", "PE", "QC", "SK", "YT"].includes(k)));
 const reEsc = (x: string) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 function cityWithoutState(text: string, c: Collection): string {
   const [city, st] = (c.locations[0] ? [c.locations[0].city, c.locations[0].state] : c.fields.cityState.value.split(",").map((x) => x.trim()));
   if (!city || !st) return "";
-  return new RegExp(`\\b${reEsc(city)}\\b(?!,?\\s*${reEsc(st.slice(0, 2))}\\b)`, "i").test(text) ? `"${city}" appears without the state` : "";
+  const code = st.trim().slice(0, 2).toUpperCase();
+  const name = REGION_NAMES[code] ? `|${reEsc(REGION_NAMES[code])}` : "";
+  return new RegExp(`\\b${reEsc(city)}\\b(?!,?\\s*(${reEsc(code)}${name})\\b)`, "i").test(text) ? `"${city}" appears without the ${REGION_NAMES[code] && !US_CODES.has(code) ? "province" : "state"}` : "";
 }
 const details = (c: Collection) => toPlainText(c).slice(0, 8000);
 const now = () => new Date().toISOString();

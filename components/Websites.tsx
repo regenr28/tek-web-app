@@ -198,7 +198,7 @@ export default function Websites() {
         </div>
         {d.canManage && (
           <label className="row" style={{ gap: 6 }}>Automatic check
-            <select value={d.settings.schedule} onChange={(e) => api<{ schedule: string }>("/api/websites/settings", { method: "PUT", body: { schedule: e.target.value } }).then((s) => setD((x) => x && { ...x, settings: s })).catch((er) => setErr(er.message))}>
+            <select value={d.settings.schedule} onChange={(e) => api<Data["settings"]>("/api/websites/settings", { method: "PUT", body: { schedule: e.target.value } }).then((s) => setD((x) => x && { ...x, settings: s })).catch((er) => setErr(er.message))}>
               <option value="off">Off</option><option value="weekly">Weekly</option><option value="daily">Daily</option>
             </select>
           </label>
@@ -548,7 +548,7 @@ function MonitoringSettings({ s, onSaved, onError }: { s: Data["settings"]; onSa
   if (!open) return <div className="small"><button className="sm ghost" onClick={() => setOpen(true)}>⚙ Monitoring settings</button></div>;
   const num = (k: "notLiveDays" | "tempDomainDays" | "gbpPerDay", label: string, min: number, max: number, hint: string) => (
     <label className="field" style={{ maxWidth: 260 }}><span>{label}</span>
-      <input type="number" min={min} max={max} value={v[k]} onChange={(e) => setV({ ...v, [k]: Number(e.target.value) })} onBlur={() => { if (v[k] !== s[k]) save({ [k]: v[k] }); }} />
+      <input type="number" min={min} max={max} value={v[k]} onChange={(e) => setV({ ...v, [k]: Number(e.target.value) })} onBlur={() => { if (v[k] !== s[k]) save({ [k]: v[k] } as Partial<Data["settings"]>); }} />
       <span className="muted small">{hint}</span></label>
   );
   return (

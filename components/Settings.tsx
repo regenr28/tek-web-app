@@ -17,14 +17,14 @@ export default function Settings({ me, dudaApi }: { me: Me; dudaApi: boolean }) 
           {isSuper && <button className={tab === "security" ? "active" : ""} onClick={() => setTab("security")}>Security</button>}
           {isSuper && <button className={tab === "ai" ? "active" : ""} onClick={() => setTab("ai")}>AI providers</button>}
           {isAdmin && <button className={tab === "research" ? "active" : ""} onClick={() => setTab("research")}>Research</button>}
-          {isAdmin && <button className={tab === "homepage" ? "active" : ""} onClick={() => setTab("homepage")}>Homepage prompts</button>}
+          {isAdmin && <button className={tab === "homepage" ? "active" : ""} onClick={() => setTab("homepage")}>Prompts</button>}
           {isAdmin && <button className={tab === "members" ? "active" : ""} onClick={() => setTab("members")}>Members</button>}
           <button className={tab === "duda" ? "active" : ""} onClick={() => setTab("duda")}>Duda API</button>
           {isSuper && <button className={tab === "log" ? "active" : ""} onClick={() => setTab("log")}>Security log</button>}
         </div>
         {tab === "ai" && isSuper && <AiSettings />}
         {tab === "research" && isAdmin && <ResearchSettings canEdit={isSuper} />}
-        {tab === "homepage" && isAdmin && <HomepagePrompts />}
+        {tab === "homepage" && isAdmin && <PromptSettings />}
         {tab === "members" && isAdmin && <Members me={me} />}
         {tab === "duda" && <DudaInfo enabled={dudaApi} />}
         {tab === "security" && isSuper && <SecuritySettings />}
@@ -359,6 +359,45 @@ function ResearchSettings({ canEdit }: { canEdit: boolean }) {
 
 type HpLib = { rules: string; prompts: { id: string; name: string; prompt: string }[]; importedAt?: string };
 /** The team's homepage prompts (one per template) and the rules added to every prompt. */
+type PromptLib = { prompts: Record<string, string> & { custom: string[] }; defaults: Record<string, string>; info: { key: string; label: string; help: string }[]; variables: [string, string][] };
+
+/** Settings → Prompts: Homepage (per template) + Location, FAQ, Meta, Service pages, URL redirects. */
+function PromptSettings() {
+  const [cat, setCat] = useState("homepage");
+  const [lib, setLib] = useState<PromptLib | null>(null);
+  const [text, setText] = useState("");
+  const [err, setErr] = useState(""); const [msg, setMsg] = useState("");
+  useEffect(() => { if (cat !== "homepage" && !lib) api<PromptLib>("/api/settings/prompts").then(setLib).catch((e) => setErr(e.message)); }, [cat, lib]);
+  useEffect(() => { if (lib && cat !== "homepage") setText(lib.prompts[cat] || ""); setMsg(""); }, [cat, lib]);
+  const cats: [string, string][] = [["homepage", "Homepage"], ["location", "Location"], ["faqPages", "FAQ (pages)"], ["faqSections", "FAQ (one-page)"], ["meta", "Meta"], ["services", "Services"], ["redirects", "URL Redirects"]];
+  const save = async (t: string) => {
+    setErr(""); setMsg("");
+    try { const r = await api<PromptLib>("/api/settings/prompts", { method: "PUT", body: { key: cat, text: t } }); setLib(r); setText(r.prompts[cat]); setMsg(t.trim() ? "Saved." : "Back to the default prompt."); }
+    catch (e) { setErr((e as Error).message); }
+  };
+  const info = lib?.info.find((x) => x.key === cat);
+  return (
+    <div className="stack">
+      <div className="row" style={{ gap: 6 }}>{cats.map(([k, l]) => <button key={k} className={`sm ${cat === k ? "primary" : ""}`} onClick={() => setCat(k)}>{l}</button>)}</div>
+      {cat === "homepage" ? <HomepagePrompts /> : !lib ? <p className="muted">{err || "Loading…"}</p> : (
+        <div className="stack" style={{ maxWidth: 900 }}>
+          <p className="muted small" style={{ margin: 0 }}>{info?.help} Used on each project&apos;s <b>Prompts</b> tab. {lib.prompts.custom.includes(cat) ? <b>Edited by your team.</b> : "Default prompt."}</p>
+          <textarea className="mono" rows={24} value={text} onChange={(e) => setText(e.target.value)} />
+          <div className="row">
+            <button className="primary sm" disabled={text === lib.prompts[cat]} onClick={() => save(text)}>Save</button>
+            {lib.prompts.custom.includes(cat) && <button className="sm ghost" onClick={() => { if (confirm("Go back to the default prompt?")) save(""); }}>Reset to default</button>}
+            <span className="muted small">Pasting a spreadsheet formula (=&quot;… &quot; &amp; Shop_Name &amp; &quot; …&quot;) is fine — it&apos;s converted to {"{{Shop_Name}}"}.</span>
+          </div>
+          <details className="small"><summary>Variables (filled from the project&apos;s Data Collection)</summary>
+            <table className="t small"><tbody>{lib.variables.map(([k, d]) => <tr key={k}><td style={{ width: 200 }}><code>{`{{${k}}}`}</code></td><td>{d}</td></tr>)}</tbody></table>
+          </details>
+          {msg && <div className="alert">{msg}</div>}{err && <div className="alert error">{err}</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function HomepagePrompts() {
   const [lib, setLib] = useState<HpLib | null>(null);
   const [err, setErr] = useState(""); const [msg, setMsg] = useState("");
@@ -373,25 +412,42 @@ function HomepagePrompts() {
   const importFile = async (file: File) => {
     setErr(""); setMsg("Importing…");
     try {
-      if (!/\.xlsx$/i.test(file.name)) throw new Error("Choose the guidelines .xlsx file");
       if (file.size > 60 * 1024 * 1024) throw new Error("That file is over 60 MB");
-      // read the workbook here in the browser and send only the "My homepage prompt" sheet (uploads are capped at 4.5 MB)
-      const { readXlsx } = await import("@/lib/xlsx");
-      const sheet = readXlsx(new Uint8Array(await file.arrayBuffer())).find((x) => /homepage prompt/i.test(x.name));
-      if (!sheet) throw new Error('No "My homepage prompt" sheet in that file');
-      const rows = sheet.rows.filter((r) => r.some((c) => c.trim())).map((r) => r.slice(0, 5)); // B = template, C = prompt, E1 = rules
-      const r = await api<HpLib>("/api/settings/homepage-prompts/import", { body: { rows } });
-      setLib(r); setMsg(`Imported ${r.prompts.length} template prompts.`);
+      let rows: string[][];
+      if (/\.xlsx$/i.test(file.name)) {
+        // read the workbook here in the browser and send only the "My homepage prompt" sheet (uploads are capped at 4.5 MB)
+        const { readXlsx } = await import("@/lib/xlsx");
+        const sheet = readXlsx(new Uint8Array(await file.arrayBuffer())).find((x) => /homepage prompt/i.test(x.name));
+        if (!sheet) throw new Error('No "My homepage prompt" sheet in that file');
+        rows = sheet.rows.filter((r) => r.some((c) => c.trim())).map((r) => r.slice(0, 5)); // B = template, C = prompt, E1 = rules
+      } else if (/\.(txt|tsv|csv)$/i.test(file.name)) {
+        // text copied out of the sheet: template name, then the prompt (tab- or comma-separated) → same shape as the sheet (B, C)
+        const { parseDelimited } = await import("@/lib/tsv");
+        const text = await file.text();
+        const delim = text.split("\n", 1)[0].includes("\t") ? "\t" : ",";
+        rows = parseDelimited(text, delim).filter((r) => r.length >= 2).map((r) => ["", r[0], r[1]]);
+      } else throw new Error("Choose the guidelines .xlsx, or a .txt / .tsv copy of the prompts");
+      const r = await api<HpLib>("/api/settings/homepage-prompts/import", { body: { rows: rows.slice(0, 5000).map((x) => x.map((c) => c.slice(0, 40000))) } });
+      setLib(r); setMsg(`Imported ${r.prompts.length} template prompts (formatting tidied: quotes, labels, separators, section numbers).`);
     }
+    catch (e) { setErr((e as Error).message); setMsg(""); }
+  };
+  const loadBuiltin = async () => {
+    if (lib.prompts.length && !confirm("Replace the current list with the 68 built-in template prompts? Your global rules are kept.")) return;
+    setErr(""); setMsg("Loading…");
+    try { const r = await api<HpLib>("/api/settings/homepage-prompts/import", { body: { builtin: true } }); setLib(r); setMsg(`Loaded ${r.prompts.length} built-in template prompts.`); }
     catch (e) { setErr((e as Error).message); setMsg(""); }
   };
   const shown = lib.prompts.filter((p) => !q || p.name.toLowerCase().includes(q.toLowerCase()));
   return (
     <div className="stack" style={{ maxWidth: 900 }}>
-      <p className="muted small" style={{ margin: 0 }}>Each project&apos;s <b>Homepage</b> tab uses the prompt that matches its template (e.g. “HP Only - Single Location 16”, “Single Location Template 31”, “MSO Single Location 14”). Import them from your guidelines workbook (sheet <b>My homepage prompt</b>: column B = template, column C = prompt){lib.importedAt ? ` — last imported ${ago(lib.importedAt)}` : ""}.</p>
-      <label className="dropzone small"><b>Import from the guidelines .xlsx</b><div>replaces the list below</div>
-        <input type="file" hidden accept=".xlsx" onChange={(e) => { const f = e.target.files?.[0]; if (f) importFile(f); e.target.value = ""; }} />
-      </label>
+      <p className="muted small" style={{ margin: 0 }}>Each project&apos;s <b>Prompts → Homepage</b> tab uses the prompt that matches its template (e.g. “HP Only - Single Location 16”, “Single Location Template 31”, “MSO Single Location 14”). Import them from your guidelines workbook (sheet <b>My homepage prompt</b>: column B = template, column C = prompt){lib.importedAt ? ` — last imported ${ago(lib.importedAt)}` : ""}.</p>
+      <div className="row" style={{ alignItems: "stretch" }}>
+        <label className="dropzone small" style={{ flex: 1 }}><b>Import prompts</b><div>guidelines .xlsx, or a .txt / .tsv copy (template name, tab, prompt) — replaces the list below</div>
+          <input type="file" hidden accept=".xlsx,.txt,.tsv,.csv" onChange={(e) => { const f = e.target.files?.[0]; if (f) importFile(f); e.target.value = ""; }} />
+        </label>
+        <button className="sm" onClick={loadBuiltin} title="The team's prompts shipped with the app (Oct 2026 export, cleaned)">Use the 68 built-in prompts</button>
+      </div>
       <label className="field"><span>Rules added to every prompt</span>
         <textarea rows={5} value={lib.rules} onChange={(e) => setLib({ ...lib, rules: e.target.value })} onBlur={() => save(lib)} />
       </label>

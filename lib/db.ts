@@ -199,6 +199,8 @@ const COLUMNS: [table: string, column: string, ddl: string][] = [
   ["sites", "homepage_json", "TEXT"],
   // What a member may open: all | projects | websites (Super Admins always see everything)
   ["users", "access", "TEXT NOT NULL DEFAULT 'all'"],
+  // Location / FAQ / Meta / Service pages / URL redirects generated from the Prompts tab
+  ["sites", "prompts_json", "TEXT"],
 ];
 
 async function migrate() {

@@ -5,7 +5,9 @@ import { HttpError } from "./security";
 import { callAI, parseJson } from "./ai";
 import { loadProject } from "./projects";
 import { toPlainText, type Collection } from "./collect";
-import { randomToken } from "./secrets";
+import { randomToken, sha256 } from "./secrets";
+import BUILTIN from "./data/homepage-prompts.json";
+import { getPromptState, defaultServices } from "./prompts";
 
 /**
  * Homepage content: the team's own per-template prompts ("My homepage prompt" sheet) + the project's Data Collection
@@ -15,7 +17,9 @@ import { randomToken } from "./secrets";
 
 export type HpPrompt = { id: string; name: string; prompt: string };
 export type HpLibrary = { rules: string; prompts: HpPrompt[]; importedAt?: string };
-export type HpItem = { id: string; label: string; text: string; min: number; max: number; rule: string; example?: string; edited?: boolean };
+export type HpItem = { id: string; label: string; text: string; min: number; max: number; rule: string; example?: string; edited?: boolean;
+  /** text before the last AI revision (for Undo) */
+  prev?: string };
 export type HpSection = { title: string; items: HpItem[] };
 export type HpVersion = { at: string; promptId: string; promptName: string; provider: string; sections: HpSection[]; issues: string[]; fixRounds: number };
 export type HpState = { selected?: string; versions: HpVersion[]; current: number };
@@ -30,7 +34,58 @@ When mentioning the business name, make sure it's the complete name.`;
 export async function getLibrary(): Promise<HpLibrary> {
   const r = await one<{ value: string }>("SELECT value FROM settings WHERE key = 'homepage_prompts'");
   const v = r ? (JSON.parse(r.value) as HpLibrary) : null;
-  return { rules: v?.rules ?? DEFAULT_RULES, prompts: v?.prompts || [], importedAt: v?.importedAt };
+  // Nothing imported yet: use the built-in set (stable ids, so a project's chosen prompt survives)
+  return { rules: v?.rules ?? DEFAULT_RULES, prompts: v?.prompts?.length ? v.prompts : builtinPrompts(), importedAt: v?.importedAt };
+}
+
+/** The team's 68 template prompts shipped with the app (cleaned from the "My homepage prompt" export, Oct 2026). */
+export function builtinPrompts(): HpPrompt[] {
+  return (BUILTIN as { name: string; prompt: string }[]).map((p) => ({ id: "b" + sha256(p.name).slice(0, 8), name: p.name, prompt: p.prompt }));
+}
+
+/* ---------------- tidy imported prompts ---------------- */
+
+/** "HP Ony - Single Location 22" → "HP Only - Single Location Template 22", "Single Location Template 04" → "… 4". */
+export function canonicalPromptName(raw: string): string {
+  const n = raw.replace(/\s+/g, " ").trim().replace(/\bOny\b/i, "Only");
+  const ver = n.match(/\b(v\d+)\s*$/i)?.[1]?.toLowerCase() || "";
+  const num = n.replace(/\bv\d+\b/gi, "").match(/(\d+)(?!.*\d)/)?.[1];
+  if (!num) return n;
+  const kind = /\bMSO\b/i.test(n) ? "MSO Single Location Template" : /\bHP\b|home ?page only/i.test(n) ? "HP Only - Single Location Template" : /single location/i.test(n) ? "Single Location Template" : "";
+  return kind ? `${kind} ${Number(num)}${ver ? ` ${ver}` : ""}` : n;
+}
+
+const LABELS: [RegExp, (m: RegExpMatchArray) => string][] = [
+  [/^subtitle$/i, () => "subtitle"], [/^title$/i, () => "title"], [/^h([1-6])$/i, (m) => `h${m[1]}`], [/^p$/i, () => "p"],
+  [/^p(\d)$/i, (m) => `paragraph ${m[1]}`], [/^paragraph( \d+)?$/i, (m) => `paragraph${m[1] || ""}`],
+  [/^subsection( \d+)?$/i, (m) => `Subsection${m[1] || ""}`], [/^column( \d+(?:-\d+)?)?$/i, (m) => `Column${m[1] || ""}`], [/^row( \d+(?:-\d+)?)?$/i, (m) => `Row${m[1] || ""}`],
+];
+/**
+ * Formatting only — the wording is kept: strips spreadsheet quote artifacts and markdown escapes, trims spaces,
+ * one style of separator ("---") and labels (h2, subtitle, paragraph 1, Subsection 1), sections renumbered 1, 2, 3… in order.
+ */
+export function cleanPrompt(raw: string): string {
+  let p = raw.replace(/\r\n?/g, "\n").replace(/\u00a0/g, " ").trim().replace(/^"+/, "").replace(/"+$/, "")
+    .replace(/""/g, '"').replace(/\\([[\]*])/g, "$1");
+  p = p.split("\n").map((l) => {
+    const line = l.replace(/\s+$/, "");
+    const s = line.trim();
+    if (s && /^[-—_=]+$/.test(s)) return "---";
+    const m = line.match(/^(\s*)([A-Za-z][A-Za-z0-9 -]{0,20}?)\s*:(.*)$/);
+    if (!m) return line;
+    for (const [re, fn] of LABELS) { const x = m[2].trim().match(re); if (x) return `${m[1]}${fn(x)}:${m[3]}`; }
+    return line;
+  }).join("\n");
+  p = p.replace(/\n{3,}/g, "\n\n").replace(/(\n---\n)(\s*\n---\n)+/g, "$1");
+  let n = 0;
+  p = p.replace(/^Section \d+\s*:/gm, () => `Section ${++n}:`);
+  p = p.replace(/[ \t]*(\*Change This)/g, "  $1").replace(/^ {2}\*Change/gm, "*Change");
+  return p.trim();
+}
+/** Two prompts pasted into one cell → two prompts. */
+function splitPrompts(raw: string): string[] {
+  const idx = [...raw.matchAll(/"?\s*Rewrite and Optimize Auto Shop Homepage Content/g)].map((m) => m.index!);
+  return idx.length > 1 ? idx.map((a, i) => raw.slice(a, idx[i + 1] ?? raw.length)) : [raw];
 }
 export async function saveLibrary(lib: HpLibrary) {
   await run("INSERT INTO settings (key, value) VALUES ('homepage_prompts', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [JSON.stringify(lib)]);
@@ -52,15 +107,21 @@ export function parsePromptRows(rows: string[][]): HpLibrary {
   const prompts: HpPrompt[] = [];
   const seen = new Map<string, number>();
   for (const r of sh.rows) {
-    const name = (r[1] || "").trim(), prompt = (r[2] || "").trim().replace(/^"+|"+$/g, "").replace(/""/g, '"');
-    if (!name || prompt.length < 200 || !/section/i.test(prompt)) continue;
-    const n = (seen.get(name.toLowerCase()) || 0) + 1;
-    seen.set(name.toLowerCase(), n);
-    prompts.push({ id: randomToken(6), name: n > 1 ? `${name} (${n})` : name, prompt: prompt.slice(0, 30000) });
+    const rawName = (r[1] || "").trim(), rawPrompt = (r[2] || "").trim();
+    if (!rawName || rawPrompt.length < 200 || !/section/i.test(rawPrompt)) continue; // notes rows (CSS, image credits…) have no name
+    splitPrompts(rawPrompt).forEach((part, i) => {
+      const prompt = cleanPrompt(part);
+      let name = canonicalPromptName(rawName) + (i ? " v2" : "");
+      const n = (seen.get(name.toLowerCase()) || 0) + 1;
+      seen.set(name.toLowerCase(), n);
+      if (n > 1) name = /\bv\d+$/.test(name) ? `${name}.${n}` : `${name} v${n}`; // same template name used twice = a different version
+      prompts.push({ id: randomToken(6), name, prompt: prompt.slice(0, 30000) });
+    });
   }
-  if (!prompts.length) throw new HttpError(400, "Couldn't find any template prompts (column B = template name, column C = prompt)");
+  if (!prompts.length) throw new HttpError(400, "Couldn't find any template prompts (template name, then the prompt)");
+  // global rules: row 1, column E of the guidelines sheet; empty = keep the current rules
   const rules = (sh.rows[0]?.[4] || "").trim().replace(/\s*Resend homepage content\s*/i, "\n").trim();
-  return { rules: rules || DEFAULT_RULES, prompts: prompts.slice(0, 300), importedAt: new Date().toISOString() };
+  return { rules, prompts: prompts.slice(0, 300), importedAt: new Date().toISOString() };
 }
 
 /** "HP Only - Single Location 16" → {kind:"basic", num:16} */
@@ -157,7 +218,10 @@ export async function generateHomepage(siteId: number): Promise<{ ok: boolean; s
   if (!prompt) return { ok: false, summary: lib.prompts.length ? `No homepage prompt matches "${p.row.template || "this template"}" — pick one on the Homepage tab.` : "No homepage prompts yet — import them in Settings → Homepage prompts." };
   const c = p.collection;
   const details = `${toPlainText(c)}\nRequested pages/sections: ${c.pages.join(", ") || "(none)"}`;
-  const user = `SHOP DETAILS (Data Collection — the only source of facts):\n${details.slice(0, 12000)}\n\nMY RULES (always apply):\n${lib.rules}\n\nMY HOMEPAGE PROMPT (template "${prompt.name}"):\n${prompt.prompt}\n\n${FORMAT}`;
+  const services = (await getPromptState(siteId)).services ?? defaultServices(c);
+  const svcBlock = services.length ? `\n\nSERVICES SECTION — the person chose these service topics, in this order:\n${services.map((s, i) => `${i + 1}. ${s}`).join("\n")}
+Use them for the template's service items: one item per topic, in this order, and use the topic as that item's label (instead of the template's example service names). Keep the template's number of service items: if it has fewer slots, use the first topics; if it has more, fill the rest with other services from SHOP DETAILS. Each description follows the template's limits for that slot.` : "";
+  const user = `SHOP DETAILS (Data Collection — the only source of facts):\n${details.slice(0, 12000)}\n\nMY RULES (always apply):\n${lib.rules}${svcBlock}\n\nMY HOMEPAGE PROMPT (template "${prompt.name}"):\n${prompt.prompt}\n\n${FORMAT}`;
   const r = await callAI({ system: SYSTEM, user, json: true, maxTokens: 8000 });
   const j = parseJson<{ sections?: HpSection[] }>(r.text);
   let n = 0; // plain numbered ids (L1, L2…) — easy for any AI to echo back exactly
@@ -196,6 +260,69 @@ Return ONLY JSON: {"fixes":[{"id":"","text":""}]}` });
   await saveState(siteId, st);
   const lines = sections.reduce((n, s) => n + s.items.length, 0);
   return { ok: true, summary: `Wrote ${sections.length} sections / ${lines} lines with "${prompt.name}" via ${r.provider}${issues.length ? ` · ${issues.length} line(s) to check` : " · all limits met"}` };
+}
+
+/** Recomputes a version's "to check" list after edits (keeps the rule notes about other lines). */
+export function refreshIssues(v: HpVersion, changed: HpItem[]) {
+  const labels = new Set(changed.map((x) => `· ${x.label}:`));
+  const ruleNotes = v.issues.filter((x) => /exclamation|without the state/.test(x) && ![...labels].some((l) => x.includes(l)));
+  v.issues = [...v.sections.flatMap((s) => s.items.map((x) => (lineIssue(x) ? `${s.title} · ${x.label}: ${lineIssue(x)}` : "")).filter(Boolean)), ...ruleNotes];
+}
+
+/**
+ * "Ask AI": rewrite one line (item) or a whole section (section index) the way the person asks, keeping each line's
+ * character limits. The previous text is kept for Undo.
+ */
+export async function reviseHomepage(siteId: number, o: { version: number; item?: string; section?: number; instruction: string }) {
+  const st = await getState(siteId);
+  const v = st.versions[o.version];
+  if (!v) throw new HttpError(404, "Version not found");
+  const sec = o.item ? v.sections.find((s) => s.items.some((it) => it.id === o.item)) : v.sections[o.section ?? -1];
+  if (!sec) throw new HttpError(404, "Section not found");
+  const targets = o.item ? sec.items.filter((it) => it.id === o.item) : sec.items;
+  const p = await loadProject(siteId);
+  const lib = await getLibrary();
+  const req = (it: HpItem) => { const l = limits(it); return l.min || l.max ? `${l.min ? `at least ${l.min}` : ""}${l.min && l.max ? " and " : ""}${l.max ? `at most ${l.max}` : ""} characters` : "no limit"; };
+  const ask = (extra = "") => callAI({ system: SYSTEM, json: true, maxTokens: 4000, user:
+`SHOP DETAILS (the only source of facts):\n${toPlainText(p.collection).slice(0, 6000)}\n\nMY RULES:\n${lib.rules}
+
+The homepage section "${sec.title}" currently reads:
+${sec.items.map((it) => `- ${it.label}: ${it.text}`).join("\n")}
+
+CHANGE REQUESTED by the person: ${o.instruction.trim().slice(0, 1500)}
+
+Rewrite ONLY these line(s), applying the change. Keep each line's role (headings stay headings) and its character limit (count spaces):
+${targets.map((it) => `- id ${it.id} | ${it.label} | ${req(it)} | now: ${it.text}`).join("\n")}${extra}
+Return ONLY JSON: {"fixes":[{"id":"","text":""}]}` });
+  const apply = (text: string, first: boolean) => {
+    const f = parseJson<{ fixes?: { id: string; text: string }[] }>(text);
+    let n = 0;
+    for (const x of f?.fixes || []) {
+      const it = targets.find((t) => t.id === x.id);
+      if (!it || typeof x.text !== "string" || !x.text.trim()) continue;
+      if (first) it.prev = it.text;
+      it.text = x.text.replace(/\s+/g, " ").trim();
+      if (HEADING.test(it.label)) it.text = it.text.replace(/!/g, "");
+      it.edited = true; n++;
+    }
+    return n;
+  };
+  const r = await ask();
+  const n = apply(r.text, true);
+  if (!n) throw new HttpError(502, `The AI (${r.provider}) didn't return a rewrite — try again or reword the request.`);
+  // one more try for lines that now miss their limits
+  const bad = targets.filter((it) => lineIssue(it) && lineIssue(it) !== "empty");
+  if (bad.length) {
+    try {
+      const fx = await callAI({ system: SYSTEM, json: true, maxTokens: 2000, user: `Adjust the length of each line so it fits its range (count characters incl. spaces), keeping the wording and the requested change ("${o.instruction.trim().slice(0, 300)}"):
+${bad.map((it) => `- id ${it.id} | ${it.label} | ${req(it)} | now ${it.text.length}: ${it.text}`).join("\n")}
+Return ONLY JSON: {"fixes":[{"id":"","text":""}]}` });
+      apply(fx.text, false);
+    } catch { /* keep the revision; the line is flagged */ }
+  }
+  refreshIssues(v, targets);
+  await saveState(siteId, st);
+  return { changed: n, provider: r.provider };
 }
 
 /** Plain text in the team's format: section title, then "label: text" lines. */

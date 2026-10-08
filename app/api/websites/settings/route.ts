@@ -5,7 +5,7 @@ import { saveHealthSettings, healthSettings } from "@/lib/websites";
 
 /** How often all domains are checked automatically. */
 export const PUT = handle(async (req: Request) => {
-  const me = await requireUser("admin");
+  const me = await requireUser("admin", { area: "websites" });
   const b = await parseBody(req, z.object({ schedule: z.enum(["off", "daily", "weekly"]) }).strict());
   await saveHealthSettings(b);
   await logEvent("websites.schedule", me.id, b);

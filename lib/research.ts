@@ -20,7 +20,11 @@ export type Evidence = {
   gbpLocs?: { query: string; provider: string; place: Place | null; candidates: Place[]; at: string }[];
   /** GBP links / map embeds found on the shop's own website (free — no search credits) */
   gbpSite?: { url: string; found: SiteGbp[]; at: string };
-  website?: { url: string; finalUrl: string; pages: { url: string; title: string; text: string }[]; socials: string[]; signals: Record<string, unknown>; at: string };
+  website?: { url: string; finalUrl: string; pages: { url: string; title: string; text: string }[]; socials: string[]; signals: Record<string, unknown>; at: string;
+    /** Every internal page URL found (homepage + menu links, sitemap, links on the pages we opened) */
+    urls?: string[] };
+  /** NAPA AutoCare / TechNet program profiles: what warranty and certifications the listing shows */
+  programs?: ProgramFind[];
   search?: { queries: string[]; provider: string; results: WebResult[]; at: string };
   reviews?: { key: string; provider: string; all: Review[]; at: string };
   years?: { established: string; experience: string; quote: string; url: string; via: string; at: string };
@@ -29,16 +33,26 @@ export type Evidence = {
   socialFinds?: SocialFind[];
   socialRejected?: string[];
 };
+export type ProgramId = "napa" | "technet";
+export type ProgramFind = {
+  program: ProgramId; label: string; url: string;
+  /** where the profile link came from */
+  via: string;
+  /** how the page was read: "page" = fetched directly, "ai" = Groq browser read it, "none" = couldn't read it */
+  read: "page" | "ai" | "none";
+  warranty: string[]; certifications: string[]; note: string; at: string;
+};
 export type SocialFind = { url: string; reason: string; loc: number; via: "website" | "search"; rating?: number; review?: boolean };
 
 export type ListingRow = { source: string; url: string; name: string; phone: string; address: string; website: string; read: "data" | "page" | "ai" | "search" | "none"; marks: { name?: string; phone?: string; address?: string; website?: string } };
 export type CrossCheck = { at: string; rows: ListingRow[]; issues: string[] };
 
-export type StepId = "gbp" | "website" | "search" | "check" | "ai" | "review";
+export type StepId = "gbp" | "website" | "search" | "programs" | "check" | "ai" | "review";
 export const STEPS: { id: StepId; label: string }[] = [
   { id: "gbp", label: "Google Business Profile" },
   { id: "website", label: "Existing website" },
   { id: "search", label: "Web & social search" },
+  { id: "programs", label: "NAPA / TechNet profile" },
   { id: "check", label: "Cross-check listings" },
   { id: "ai", label: "AI fill & format" },
   { id: "review", label: "AI review" },
@@ -490,6 +504,26 @@ function warrantySentences(text: string, url: string): string[] {
     .slice(0, 4).map((x) => `${x.trim()} (${url})`);
 }
 
+/** Files and non-page links that aren't part of the site's page list. */
+const NOT_A_PAGE = /\.(jpe?g|png|gif|webp|svg|ico|bmp|tiff?|pdf|docx?|xlsx?|pptx?|zip|rar|mp[34]|mov|avi|webm|wav|css|js|json|xml|txt|woff2?|ttf|eot)$/i;
+const TRACKING = /^(utm_[a-z]+|fbclid|gclid|msclkid|mc_[a-z]+|_ga|ref)$/i;
+
+/** A same-site page URL in a stable form (no #hash, no tracking params, no trailing slash), or "" when it isn't one. */
+export function internalPageUrl(href: string, base: string, host: string, canonicalHost = ""): string {
+  try {
+    const u = new URL(href, base);
+    if (!/^https?:$/.test(u.protocol) || u.hostname.replace(/^www\./, "").toLowerCase() !== host) return "";
+    if (NOT_A_PAGE.test(u.pathname) || /\/(wp-admin|wp-json|wp-content|cdn-cgi|feed)(\/|$)/i.test(u.pathname)) return "";
+    u.hash = "";
+    for (const k of [...u.searchParams.keys()]) if (TRACKING.test(k)) u.searchParams.delete(k);
+    u.protocol = "https:"; // same page over http/https
+    if (canonicalHost) u.hostname = canonicalHost; // same page with and without www
+    let s = u.toString();
+    if (u.pathname !== "/" && s.endsWith("/") && !u.search) s = s.slice(0, -1);
+    return s;
+  } catch { return ""; }
+}
+
 function pageText($: cheerio.CheerioAPI) {
   $("script,style,noscript,svg,iframe,template,nav").remove();
   return $("body").text().replace(/\s+/g, " ").trim();
@@ -513,16 +547,23 @@ export async function stepWebsite(c: Collection, ev: Evidence): Promise<string> 
   }
   const $ = cheerio.load(home.html);
   const title = $("title").first().text().trim();
-  const finalHost = new URL(home.url).hostname.replace(/^www\./, "");
+  const finalHost = new URL(home.url).hostname.replace(/^www\./, "").toLowerCase();
   const links = new Map<string, string>();
+  /** All internal page URLs (normalized) — the full list shown to the team */
+  const allUrls = new Set<string>();
+  const programLinks = new Set<string>();
+  const canonHost = new URL(home.url).hostname.toLowerCase();
+  const addUrl = (href: string, base: string) => { const u = internalPageUrl(href, base, finalHost, canonHost); if (u) allUrls.add(u); return u; };
+  addUrl(home.url, home.url);
   const socials = new Set<string>();
   $("a[href]").each((_, a) => {
     const href = $(a).attr("href") || "";
     try {
       const abs = new URL(href, home.url);
       abs.hash = "";
+      if (programOf(abs.toString())) programLinks.add(abs.toString());
       if (platformOf(abs.toString())) { if (!GENERIC_SOCIAL.test(abs.pathname + abs.search) && abs.pathname.length > 1) socials.add(abs.toString().replace(/\/$/, "")); return; }
-      if (abs.hostname.replace(/^www\./, "") === finalHost && /^https?:$/.test(abs.protocol)) links.set(abs.toString(), $(a).text().trim().slice(0, 60));
+      if (abs.hostname.replace(/^www\./, "").toLowerCase() === finalHost && /^https?:$/.test(abs.protocol)) { links.set(abs.toString(), $(a).text().trim().slice(0, 60)); addUrl(abs.toString(), home.url); }
     } catch { /* skip */ }
   });
   const homeText = pageText($);
@@ -533,7 +574,7 @@ export async function stepWebsite(c: Collection, ev: Evidence): Promise<string> 
   // Every page we know about: homepage links + the sitemap (finds blog posts / pages not in the menu)
   const origin = new URL(home.url).origin;
   for (const u of await sitemapUrls(origin, get)) {
-    try { const x = new URL(u); if (x.hostname.replace(/^www\./, "") === finalHost && !links.has(x.toString())) links.set(x.toString(), ""); } catch { /* skip */ }
+    try { const x = new URL(u); if (x.hostname.replace(/^www\./, "").toLowerCase() === finalHost) { addUrl(u, home.url); if (!links.has(x.toString())) links.set(x.toString(), ""); } } catch { /* skip */ }
   }
   const isHome = (u: string) => u.replace(/\/$/, "") === home.url.replace(/\/$/, "");
   const slug = (u: string) => { try { return decodeURIComponent(new URL(u).pathname); } catch { return u; } };
@@ -557,6 +598,7 @@ export async function stepWebsite(c: Collection, ev: Evidence): Promise<string> 
     const r = await get(p.url);
     if (r.status >= 400 || !r.html) return null;
     const $$ = cheerio.load(r.html);
+    $$("a[href]").each((_, a) => { const h = $$(a).attr("href") || ""; addUrl(h, r.url); try { const x = new URL(h, r.url).toString(); if (programOf(x)) programLinks.add(x); } catch { /* skip */ } });
     const text = pageText($$);
     warranty.push(...warrantySentences(text, r.url));
     // keep the part of a long page that talks about warranties/financing/coupons
@@ -566,8 +608,24 @@ export async function stepWebsite(c: Collection, ev: Evidence): Promise<string> 
   }));
   for (const s of sub) if (s.status === "fulfilled" && s.value) pages.push(s.value);
 
-  const signals = { copyrightYear, brandMatch, redirectedTo: domainOf(home.url) !== domainOf(start) ? home.url : null, title, pagesRead: pages.length, warranty: uniqLines(warranty).slice(0, 8) };
-  ev.website = { url: start, finalUrl: home.url, pages, socials: [...socials], signals, at: now() };
+  // Internal URL list: also open pages we haven't read yet (menu pages on sites without a sitemap) and collect their links.
+  const opened = new Set([home.url, ...picked.slice(0, 10).map((p) => p.url)].map((u) => internalPageUrl(u, home.url, finalHost, canonHost)));
+  for (let round = 0; round < 2 && allUrls.size < 1000; round++) {
+    const next = [...allUrls].filter((u) => !opened.has(u)).slice(0, 15);
+    if (!next.length) break;
+    next.forEach((u) => opened.add(u));
+    const found = await Promise.allSettled(next.map(async (u) => {
+      const r = await get(u);
+      if (r.status >= 400 || !r.html) return;
+      const $$ = cheerio.load(r.html);
+      $$("a[href]").each((_, a) => { addUrl($$(a).attr("href") || "", r.url); });
+    }));
+    void found;
+  }
+  const urls = [...allUrls].sort((a, b) => a.length - b.length || a.localeCompare(b)).slice(0, 1000);
+
+  const signals = { copyrightYear, brandMatch, redirectedTo: domainOf(home.url) !== domainOf(start) ? home.url : null, title, pagesRead: pages.length, warranty: uniqLines(warranty).slice(0, 8), urlCount: urls.length, programLinks: [...programLinks].slice(0, 10) };
+  ev.website = { url: start, finalUrl: home.url, pages, socials: [...socials], signals, at: now(), urls };
 
   const issues: string[] = [];
   if (!brandMatch) issues.push(`the site doesn't mention "${c.fields.shopName.value}" (title: "${title.slice(0, 60)}") — it may be an old brand or a different business`);
@@ -594,7 +652,7 @@ export async function stepWebsite(c: Collection, ev: Evidence): Promise<string> 
   if (signals.warranty.length && (!c.fields.warranties.value.trim() || c.fields.warranties.source !== "jira") && !c.fields.warranties.manual)
     patch(c, "warranties", { note: `Their website mentions: ${signals.warranty.slice(0, 3).join(" · ")}`, source: "website", status: "review" });
   composeSocials(c, ev);
-  return `Read ${pages.length} page(s) from ${domainOf(home.url)}${signals.warranty.length ? " · warranty text found" : ""}`;
+  return `Read ${pages.length} page(s) from ${domainOf(home.url)} · ${urls.length} internal URL(s) found${signals.warranty.length ? " · warranty text found" : ""}`;
 }
 
 /** A social URL → its profile (posts, videos, photos… point back to the profile). null = not a profile link. */
@@ -918,6 +976,167 @@ export async function stepSearch(c: Collection, ev: Evidence): Promise<string> {
   return `${results.length} results via ${provider}; ${socials.length} social profile(s) confirmed${rejected.length ? `, ${rejected.length} not added (couldn't confirm)` : ""}${yrs ? `; ${yrs}` : ""}`;
 }
 
+// ---------- 3b. NAPA AutoCare / TechNet program profiles ----------
+
+/**
+ * Shops in the NAPA AutoCare or TechNet programs have a public profile on the program's site that shows the
+ * warranty they offer (e.g. "24 mo./24K mile Nationwide Warranty offered") and badges such as "ASE Certified Technicians".
+ * Found values are always marked for review — they never replace Jira.
+ */
+const PROGRAMS: { id: ProgramId; label: string; claim: RegExp; link: RegExp; site: string }[] = [
+  { id: "napa", label: "NAPA AutoCare", claim: /\bnapa\b/i, link: /napaonline\.com\/.*(auto-?care|facilityid)|napaautocare\.com/i, site: "napaonline.com" },
+  { id: "technet", label: "TechNet", claim: /\btech\s?net\b/i, link: /technetprofessional\.com\/(?!$|warranty\b|about\b|join\b)./i, site: "technetprofessional.com" },
+];
+export function programOf(url: string): ProgramId | "" {
+  return PROGRAMS.find((p) => p.link.test(url))?.id || "";
+}
+/** Program pages that are about the program in general, not one shop (no point reading them). */
+const GENERIC_PROGRAM_PAGE = /napaonline\.com\/en\/(auto-?care|old-auto-care|napa-autocare-centers)\/?(\?(?!.*facilityid).*)?$|napaonline\.com\/en\/napa-autocare-centers\/invalid/i;
+
+/** "24 mo./24K mile Nationwide Warranty offered", "36 Month / 36,000 Mile Warranty", "Nationwide Peace of Mind Warranty". */
+const WARRANTY_TERMS = /\b\d{1,3}\s*-?\s*(?:mo\.?|mos\.?|months?)\s*(?:\/|or|&|and|,)?\s*\d{1,3}(?:,?000|\s?k)\s*-?\s*(?:mi\.?|miles?)\b[^<>"{}\n.;|]{0,60}/gi;
+const WARRANTY_NAMED = /\b(?:nationwide|peace of mind|limited)[^<>"{}\n.;|]{0,30}\bwarrant(?:y|ies)\b[^<>"{}\n.;|]{0,30}/gi;
+/** Badge-style certification text (kept short so menu/footer text doesn't leak in). */
+const CERT_PHRASE = /\b(?:ASE[- ](?:Certified|Master|Blue Seal)[A-Za-z ]{0,25}|ASE Blue Seal[A-Za-z ]{0,20}|AAA[- ]Approved[A-Za-z ]{0,20}|I-?CAR[A-Za-z ]{0,20}|Certified (?:Technicians?|Mechanics?)|(?:Bosch|ACDelco|Motorcraft|Mopar)[- ](?:Certified|Service)[A-Za-z ]{0,15}|Master (?:Technicians?|Mechanics?)|Hybrid (?:&|and)? ?(?:EV|Electric)? ?Certified|BBB Accredited[A-Za-z ]{0,15})/g;
+
+const cleanPhrase = (s: string) => s.replace(/\\u0026/g, "&").replace(/&amp;/g, "&").replace(/\\[nrt]/g, " ").replace(/\s+/g, " ").replace(/[\s,:-]+$/, "").trim();
+
+/** "Nationwide Warranty" is dropped when "24 mo./24K mile Nationwide Warranty" is also there. */
+const dropContained = (list: string[]) => list.filter((x, i) => !list.some((y, j) => j !== i && y.length > x.length && y.toLowerCase().includes(x.toLowerCase())));
+
+/** Reads a program profile page: everything in the HTML (including embedded data in scripts), not just the visible text. */
+export function readProgramPage(html: string): { warranty: string[]; certifications: string[]; text: string } {
+  const $ = cheerio.load(html);
+  const raw = $.html();
+  const warranty = dropContained(uniqLines([...raw.matchAll(WARRANTY_TERMS), ...raw.matchAll(WARRANTY_NAMED)].map((m) => cleanPhrase(m[0]))
+    .filter((x) => x.length >= 8 && x.length <= 90 && !/\b(join|become|program members?|learn more|terms|click)\b/i.test(x)))).slice(0, 4);
+  const certifications = dropContained(uniqLines([...raw.matchAll(CERT_PHRASE)].map((m) => cleanPhrase(m[0]))
+    .filter((x) => x.length >= 3 && x.length <= 40))).slice(0, 8);
+  $("script,style,noscript,svg,iframe,template,nav,header,footer").remove();
+  return { warranty, certifications, text: $("body").text().replace(/\s+/g, " ").trim() };
+}
+
+/** Does this profile belong to our shop? Phone, street number + street word, or the name + city. */
+function profileMatches(c: Collection, text: string): string {
+  const t = text.toLowerCase();
+  const d = text.replace(/\D/g, "");
+  for (const L of locInfos(c)) {
+    const ph = digits(L.phone);
+    if (ph.length === 10 && d.includes(ph)) return "phone";
+    const m = L.address.match(/^\s*(\d{1,6})\s+(?:[NSEW]\.?\s+)?([A-Za-z]{3,})/);
+    if (m && new RegExp(`\\b${reEsc(m[1])}\\s+(?:[nsew]\\.?\\s+)?${reEsc(m[2].toLowerCase())}`).test(t)) return "address";
+    if (L.city && t.includes(L.city.toLowerCase()) && nameSimilarity(c.fields.shopName.value, text.slice(0, 400)) >= 0.5) return "name and city";
+  }
+  return norm(text).includes(norm(c.fields.shopName.value)) && c.fields.shopName.value.length > 6 ? "name" : "";
+}
+
+async function readProgramProfile(c: Collection, label: string, url: string): Promise<Pick<ProgramFind, "read" | "warranty" | "certifications" | "note">> {
+  let fetchNote = "";
+  try {
+    const r = await safeFetch(url, { hosts: "public", headers: { "User-Agent": UA, Accept: "text/html" }, timeoutMs: 15000, maxBytes: 4_000_000 });
+    if (r.status < 400) {
+      const got = readProgramPage(r.text());
+      const match = profileMatches(c, got.text);
+      if (!match && got.text.length > 200) return { read: "page", warranty: [], certifications: [], note: `This ${label} profile doesn't show the shop's phone or address — it may be another shop. Not used.` };
+      if (got.warranty.length || got.certifications.length) return { read: "page", warranty: got.warranty, certifications: got.certifications, note: match ? `Profile matches by ${match}.` : "" };
+      fetchNote = "the page loads these details with script";
+    } else fetchNote = `the page returned HTTP ${r.status}`;
+  } catch (e) { fetchNote = `couldn't open it (${(e as Error).message.slice(0, 80)})`; }
+
+  // Second chance: Groq's browser can open pages that build their content with script
+  try {
+    const answer = await groqBrowserSearch(
+`Open this exact page: ${url}
+It should be the ${label} shop profile for "${c.fields.shopName.value}" at ${c.fields.address.value || c.fields.cityState.value}.
+Report ONLY what that page itself shows. Reply with JSON only:
+{"sameShop":true|false,"warranty":["exact warranty text shown, e.g. 24 mo./24K mile Nationwide Warranty offered"],"certifications":["exact badges shown, e.g. ASE Certified Technicians"]}
+Use empty arrays when the page doesn't show them. Never use general ${label} program information from other pages.`);
+    const j = parseJson<{ sameShop?: boolean; warranty?: string[]; certifications?: string[] }>(answer);
+    if (j && j.sameShop !== false) {
+      const warranty = uniqLines((j.warranty || []).map(String).map(cleanPhrase).filter((x) => x.length >= 6 && x.length <= 100)).slice(0, 4);
+      const certifications = uniqLines((j.certifications || []).map(String).map(cleanPhrase).filter((x) => x.length >= 3 && x.length <= 60)).slice(0, 8);
+      if (warranty.length || certifications.length)
+        return { read: "ai", warranty, certifications, note: `Read by Groq AI (${fetchNote}) — open the profile to double-check.` };
+    }
+    if (j?.sameShop === false) return { read: "ai", warranty: [], certifications: [], note: `Groq AI says this ${label} profile is a different shop — check it.` };
+  } catch { /* no Groq key or quota — fall through */ }
+  return { read: "none", warranty: [], certifications: [], note: `Couldn't read the warranty or certifications automatically (${fetchNote || "nothing found"}). Open the profile and copy them.` };
+}
+
+export async function stepPrograms(c: Collection, ev: Evidence): Promise<string> {
+  const name = c.fields.shopName.value;
+  if (!name) return "Skipped — no shop name";
+  const claimedText = `${c.fields.certifications.value}\n${c.fields.warranties.value}`;
+  const found = new Map<string, { program: ProgramId; via: string }>();
+  const add = (u: string, via: string) => {
+    const p = programOf(u);
+    if (!p || GENERIC_PROGRAM_PAGE.test(u)) return;
+    const key = u.replace(/#.*$/, "");
+    if (!found.has(key)) found.set(key, { program: p, via });
+  };
+  for (const u of ((ev.website?.signals as { programLinks?: string[] } | undefined)?.programLinks || [])) add(u, "linked on their website");
+  if (ev.gbp?.place?.website) add(ev.gbp.place.website, "their GBP website link");
+  for (const g of ev.gbpLocs || []) if (g?.place?.website) add(g.place.website, "a location's GBP website link");
+  const nameTok = norm(name).split(" ").filter((t) => t.length > 2);
+  const relevant = (r: WebResult) => {
+    const hay = norm(`${r.title} ${r.snippet} ${decodeURIComponent(r.url)}`);
+    return nameTok.length ? nameTok.filter((t) => hay.includes(t)).length / nameTok.length >= 0.6 : false;
+  };
+  for (const r of ev.search?.results || []) if (relevant(r)) add(r.url, "web search");
+  for (const m of `${c.fields.certifications.note}\n${c.fields.warranties.note}`.matchAll(/https?:\/\/[^\s)·,]+/g)) add(m[0], "earlier research note");
+
+  // Claimed in Jira (or found) but no profile link yet: look it up on the program's own site
+  const claimed = PROGRAMS.filter((p) => p.claim.test(claimedText));
+  const want = PROGRAMS.filter((p) => claimed.includes(p) || [...found.values()].some((f) => f.program === p.id));
+  if (!want.length) { ev.programs = []; return "Skipped — no NAPA AutoCare or TechNet affiliation found"; }
+  const loc = locInfos(c)[0];
+  const where = [loc?.city, loc?.state].filter(Boolean).join(" ");
+  const searched: string[] = [];
+  if ((await searchAvailable()).web) for (const p of want) {
+    if ([...found.values()].some((f) => f.program === p.id)) continue;
+    const q = `site:${p.site} "${name}" ${where}`.trim();
+    searched.push(q);
+    try {
+      const r = await webSearch(q, 8);
+      for (const x of r.results) if (relevant(x) || profileMatches(c, `${x.title} ${x.snippet}`)) add(x.url, `search: ${q}`);
+    } catch { /* search quota — reported below */ }
+  }
+
+  const list = [...found.entries()].slice(0, 4);
+  const out: ProgramFind[] = [];
+  for (const [url, f] of list) {
+    const label = PROGRAMS.find((p) => p.id === f.program)!.label;
+    const r = await readProgramProfile(c, label, url);
+    out.push({ program: f.program, label, url, via: f.via, ...r, at: now() });
+  }
+  for (const p of want) if (!out.some((o) => o.program === p.id))
+    out.push({ program: p.id, label: p.label, url: "", via: "", read: "none", warranty: [], certifications: [], at: now(),
+      note: `Jira lists ${p.label}, but no ${p.label} profile was found${searched.length ? "" : " (web search isn't set up)"}. Look it up on ${p.site} and check the warranty and certifications shown there.` });
+  ev.programs = out;
+
+  // Put what we found next to the fields — always for review, never over Jira or your own edits
+  const good = out.filter((o) => o.warranty.length || o.certifications.length);
+  for (const o of good) {
+    const src = `${o.label} profile${o.read === "ai" ? " (read by AI)" : ""}: ${o.url}`;
+    if (o.warranty.length && !c.fields.warranties.manual) {
+      const w = o.warranty.join("\n");
+      if (c.fields.warranties.value.trim() && c.fields.warranties.source === "jira") {
+        const same = o.warranty.some((x) => c.fields.warranties.value.toLowerCase().includes(x.toLowerCase().slice(0, 12)));
+        patch(c, "warranties", { note: `${src} shows: ${o.warranty.join(" · ")}${same ? "" : " — differs from Jira (kept Jira). Confirm with the client."}`, source: "search", status: same ? undefined : "review" });
+      } else patch(c, "warranties", { value: c.fields.warranties.value.trim() ? undefined : w, note: `${src} shows: ${o.warranty.join(" · ")} — confirm before publishing.`, source: "search", status: "review" });
+    }
+    if (o.certifications.length && !c.fields.certifications.manual) {
+      const have = c.fields.certifications.value.toLowerCase();
+      const extra = o.certifications.filter((x) => !have.includes(x.toLowerCase()));
+      if (extra.length) patch(c, "certifications", { note: `${src} also lists: ${extra.join(", ")} (not added — confirm).`, source: "search", status: "review" });
+    }
+  }
+  for (const o of out.filter((x) => !x.warranty.length && !x.certifications.length))
+    patch(c, "warranties", { note: `${o.label}: ${o.note}${o.url ? ` ${o.url}` : ""}`, source: "search", status: c.fields.warranties.value.trim() ? undefined : "review" });
+
+  return out.map((o) => `${o.label}: ${o.warranty.length || o.certifications.length ? [...o.warranty, ...o.certifications].join(", ") + (o.read === "ai" ? " (AI read)" : "") : o.url ? "profile found, details not readable" : "no profile found"}`).join(" · ");
+}
+
 // ---------- 4. Cross-check every listing (GBP, website, Facebook, Yelp, …) ----------
 
 const PHONE_RE = /(?:\+?1[\s.-]?)?\(?\b([2-9]\d{2})\)?[\s.-]?(\d{3})[\s.-]?(\d{4})\b/g;
@@ -1072,6 +1291,8 @@ function evidenceBlock(ev: Evidence, kinds: RegExp, maxChars: number, withWarran
   const parts: string[] = [];
   const w = (ev.website?.signals as { warranty?: string[] } | undefined)?.warranty || [];
   if (withWarranty && w.length) parts.push(`WARRANTY SENTENCES FOUND ON THEIR WEBSITE:\n${w.map((x) => `- ${x}`).join("\n")}`);
+  const progs = (ev.programs || []).filter((p) => p.warranty.length || p.certifications.length);
+  if (withWarranty && progs.length) parts.push(`PROGRAM PROFILES (official NAPA AutoCare / TechNet listing for this shop):\n${progs.map((p) => `- [${p.url}] ${p.label}: warranty ${p.warranty.join("; ") || "(not shown)"}; certifications ${p.certifications.join("; ") || "(not shown)"}`).join("\n")}`);
   for (const p of ev.website?.pages || []) if (kinds.test(p.title) || p === ev.website!.pages[0]) parts.push(`[${p.url}] ${p.title}\n${p.text.slice(0, 1800)}`);
   for (const r of (ev.search?.results || []).slice(0, 18)) parts.push(`[${r.url}] ${r.title} — ${r.snippet.slice(0, 220)}${r.rating ? ` (rating ${r.rating})` : ""}`);
   let out = parts.join("\n\n");
@@ -1145,9 +1366,9 @@ ${evidenceBlock(ev, /services|amenities|about/i, 7000)}` });
   const b = await callAI({ system: SYS, maxTokens: 1500, user:
 `TASK B. Return {"coupons":{"value":"","note":""},"warranties":{"value":"","note":""},"financing":{"value":"","note":""},"certifications":{"value":[],"note":""},"about":{"value":"","note":""},"flags":[""]}
 - coupons: active coupons/specials with amount & conditions.
-- warranties: e.g. "36 Months / 36,000 Miles" (add "Nationwide" / "Parts & Labor" if stated). Check the WARRANTY SENTENCES and every page (blog posts too). If they're a NAPA AutoCare Center or PAC member, use that program's warranty only if the EVIDENCE shows it. Cite the page URL in note.
+- warranties: e.g. "36 Months / 36,000 Miles" (add "Nationwide" / "Parts & Labor" if stated). Check the WARRANTY SENTENCES, the PROGRAM PROFILES and every page (blog posts too). If they're a NAPA AutoCare Center, TechNet or PAC member, use that program's warranty only if the EVIDENCE shows it for this shop (the PROGRAM PROFILES list counts). Cite the page URL in note.
 - financing: providers/terms only if the site states them (e.g. Synchrony Car Care, Snap, Affirm).
-- certifications: affiliations shown in EVIDENCE (ASE, NAPA AutoCare, AAA, Carfax, BBB, Bosch, etc.). Include JIRA ones.
+- certifications: affiliations shown in EVIDENCE (ASE, NAPA AutoCare, TechNet, AAA, Carfax, BBB, Bosch, etc.), including badges on the PROGRAM PROFILES (e.g. ASE Certified Technicians). Include JIRA ones.
 - about: 1–3 sentences only if JIRA About Us is empty. Mention how long they've been in business when YEARS IN BUSINESS is given.
 - flags: short warnings (e.g. "Website is an older brand", "Looks fully mobile", "Yelp under 4★").
 Shop: ${c.fields.shopName.value}, ${c.fields.cityState.value}. Pages requested: ${c.pages.join(", ") || "(none)"}.${ev.years ? `\nYEARS IN BUSINESS: ${[ev.years.established && `established ${ev.years.established}`, ev.years.experience && `${ev.years.experience} of experience`].filter(Boolean).join(", ")} (source: ${ev.years.url})` : ""}

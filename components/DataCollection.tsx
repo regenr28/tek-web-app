@@ -16,12 +16,14 @@ type Data = {
   editorUrl: string | null; previewUrl: string; steps: { id: string; label: string }[];
   evidence: {
     gbp: GbpEv | null; gbpLocs: (GbpEv | null)[];
-    website: { url: string; pages: { url: string; title: string }[]; signals: Record<string, unknown>; at: string } | null;
+    website: { url: string; pages: { url: string; title: string }[]; signals: Record<string, unknown>; at: string; urls?: string[] } | null;
+    programs?: ProgramEv[];
     search: { provider: string; queries: string[]; results: { title: string; url: string }[]; at: string } | null;
     crosscheck: CrossCheckEv | null;
   };
   available: { web: boolean; maps: boolean; ai: boolean };
 };
+type ProgramEv = { program: string; label: string; url: string; via: string; read: "page" | "ai" | "none"; warranty: string[]; certifications: string[]; note: string; at: string };
 type Saved = { collection: Collection; tsv: string; text: string; rows: string[][] };
 
 const SOURCE_LABEL: Record<string, string> = { jira: "Jira", gbp: "GBP", website: "Website", search: "Search", ai: "AI", rule: "Rule", manual: "You" };
@@ -382,11 +384,38 @@ function AutoText({ value, onSave, rows = 1, small, mono, placeholder }: { value
   );
 }
 
+/** Every internal page URL found on their existing website — copy or download for redirects / page planning. */
+function InternalUrls({ urls, site }: { urls: string[]; site: string }) {
+  const [copied, setCopied] = useState(false);
+  if (!urls.length) return <div className="muted">No internal URLs found.</div>;
+  const copy = async () => { try { await navigator.clipboard.writeText(urls.join("\n")); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch { /* clipboard blocked */ } };
+  const download = () => {
+    const csv = "URL,Path\n" + urls.map((u) => { let path = u; try { path = new URL(u).pathname + new URL(u).search; } catch { /* keep */ } return [u, path].map((x) => `"${x.replace(/"/g, '""')}"`).join(","); }).join("\n");
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+    let host = "website"; try { host = new URL(site).hostname.replace(/^www\./, ""); } catch { /* keep */ }
+    a.download = `${host}-internal-urls.csv`;
+    a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  };
+  return (
+    <details>
+      <summary>Internal URLs ({urls.length}{urls.length >= 1000 ? "+" : ""})</summary>
+      <div className="row" style={{ margin: "4px 0" }}>
+        <button className="sm" type="button" onClick={copy}>{copied ? "Copied" : "Copy all"}</button>
+        <button className="sm" type="button" onClick={download}>Download CSV</button>
+      </div>
+      <ul style={{ margin: "4px 0", paddingLeft: 18, maxHeight: 280, overflow: "auto" }}>
+        {urls.map((u) => <li key={u}><a href={u} target="_blank" rel="noreferrer">{(() => { try { const x = new URL(u); return x.pathname + x.search; } catch { return u; } })()}</a></li>)}
+      </ul>
+    </details>
+  );
+}
+
 function Evidence({ ev, locs }: { ev: Data["evidence"]; locs: Loc[] }) {
   return (
     <div className="card stack small" style={{ boxShadow: "none" }}>
       <h3 style={{ margin: 0 }}>What research found</h3>
-      {!ev.gbp && !ev.website && !ev.search && !ev.gbpLocs?.length && <p className="muted">Nothing yet — run the research.</p>}
+      {!ev.gbp && !ev.website && !ev.search && !ev.gbpLocs?.length && !ev.programs?.length && <p className="muted">Nothing yet — run the research.</p>}
       {ev.gbpLocs?.map((g, i) => g && (
         <div key={i}><b>GBP — {locs[i]?.city || `Location ${i + 1}`}</b> <span className="muted">via {g.provider} · {ago(g.at)}</span>
           {g.title ? <div>{g.title} — {g.address} {g.rating != null && <span className="badge">{g.rating}★ · {g.reviews ?? "?"}</span>}</div> : <div className="muted">No match</div>}
@@ -401,6 +430,21 @@ function Evidence({ ev, locs }: { ev: Data["evidence"]; locs: Loc[] }) {
       {ev.website && (
         <div><b>Website</b> <span className="muted">· {ago(ev.website.at)}</span>
           <ul style={{ margin: "4px 0", paddingLeft: 18 }}>{ev.website.pages.map((p) => <li key={p.url}><a href={p.url} target="_blank" rel="noreferrer">{p.title || p.url}</a></li>)}</ul>
+          {ev.website.urls && <InternalUrls urls={ev.website.urls} site={ev.website.url} />}
+        </div>
+      )}
+      {!!ev.programs?.length && (
+        <div><b>NAPA / TechNet profile</b> <span className="muted">· {ago(ev.programs[0].at)}</span>
+          {ev.programs.map((p, i) => (
+            <div key={i} style={{ margin: "4px 0" }}>
+              <div>{p.label}{p.url ? <> — <a href={p.url} target="_blank" rel="noreferrer">open profile</a></> : ""}
+                {p.read === "ai" && <span className="badge warning" style={{ marginLeft: 6 }}>AI read — double-check</span>}
+                {p.via && <span className="muted"> · found via {p.via}</span>}</div>
+              {p.warranty.length > 0 && <div>Warranty: <b>{p.warranty.join(" · ")}</b></div>}
+              {p.certifications.length > 0 && <div>Certifications: <b>{p.certifications.join(" · ")}</b></div>}
+              {p.note && <div className="muted">{p.note}</div>}
+            </div>
+          ))}
         </div>
       )}
       {ev.search && (

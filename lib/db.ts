@@ -197,6 +197,8 @@ const COLUMNS: [table: string, column: string, ddl: string][] = [
   ["sites", "tekmetric_id", "TEXT"],
   ["sessions", "remember", "INTEGER NOT NULL DEFAULT 0"],
   ["sites", "homepage_json", "TEXT"],
+  // What a member may open: all | projects | websites (Super Admins always see everything)
+  ["users", "access", "TEXT NOT NULL DEFAULT 'all'"],
 ];
 
 async function migrate() {

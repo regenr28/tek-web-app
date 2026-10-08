@@ -1,3 +1,3 @@
 import Websites from "@/components/Websites";
-import { readyUser } from "@/lib/pageAuth";
-export default async function Page() { await readyUser(); return <Websites />; }
+import { areaUser } from "@/lib/pageAuth";
+export default async function Page() { await areaUser("websites"); return <Websites />; }

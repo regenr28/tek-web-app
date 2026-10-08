@@ -2,7 +2,7 @@ import { timingSafeEqual } from "crypto";
 import { one, run } from "./db";
 import { sha256, randomToken } from "./secrets";
 import { loadProject, saveProject, jiraRaw } from "./projects";
-import { STEPS, stepGbp, stepWebsite, stepSearch, stepCrossCheck, stepAi, stepReview, type StepId } from "./research";
+import { STEPS, stepGbp, stepWebsite, stepSearch, stepPrograms, stepCrossCheck, stepAi, stepReview, type StepId } from "./research";
 import { HttpError } from "./security";
 import { generateHomepage } from "./homepage";
 
@@ -42,6 +42,7 @@ export async function runStep(siteId: number, step: JobStep): Promise<{ ok: bool
     if (step === "gbp") summary = await stepGbp(c, ev);
     else if (step === "website") summary = await stepWebsite(c, ev);
     else if (step === "search") summary = await stepSearch(c, ev);
+    else if (step === "programs") summary = await stepPrograms(c, ev);
     else if (step === "check") summary = await stepCrossCheck(c, ev, raw);
     else if (step === "ai") summary = await stepAi(c, ev, raw);
     else summary = await stepReview(c, raw);

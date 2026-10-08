@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { one, run } from "@/lib/db";
-import { handle, requireUser, hashPassword, HttpError, hasRole, destroyUserSessions, type Role } from "@/lib/auth";
+import { handle, requireUser, hashPassword, HttpError, hasRole, destroyUserSessions, ACCESS_VALUES, type Role } from "@/lib/auth";
 import { parseBody, passwordProblem, logEvent } from "@/lib/security";
 import { idOf, type Ctx } from "@/lib/http";
 
@@ -11,6 +11,7 @@ const Body = z.object({
   name: z.string().trim().min(1).max(80).optional(),
   resetMfa: z.literal(true).optional(),
   unlock: z.literal(true).optional(),
+  access: z.enum(ACCESS_VALUES).optional(),
 });
 
 export const PATCH = handle(async (req: Request, ctx: Ctx) => {
@@ -27,6 +28,13 @@ export const PATCH = handle(async (req: Request, ctx: Ctx) => {
     await run("UPDATE users SET role = ? WHERE id = ?", [b.role, id]);
     await destroyUserSessions(id);
     await logEvent("user.role_changed", me.id, { target: id, role: b.role });
+  }
+  if (b.access) {
+    if (!hasRole(me, "super_admin")) throw new HttpError(403, "Only a Super Admin can change what a member can see");
+    if (id === me.id) throw new HttpError(400, "You can't change your own access");
+    // Takes effect on their next request (access is read from the database each time).
+    await run("UPDATE users SET access = ? WHERE id = ?", [b.access, id]);
+    await logEvent("user.access_changed", me.id, { target: id, access: b.access });
   }
   if (typeof b.active === "boolean") {
     await run("UPDATE users SET active = ? WHERE id = ?", [b.active ? 1 : 0, id]);

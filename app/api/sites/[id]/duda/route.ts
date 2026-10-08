@@ -4,7 +4,7 @@ import { idOf, type Ctx } from "@/lib/http";
 import { dudaEnabled, dudaBusinessInfo, guessSiteName } from "@/lib/duda";
 
 export const GET = handle(async (_req: Request, ctx: Ctx) => {
-  await requireUser();
+  await requireUser("member", { area: "projects" });
   if (!dudaEnabled()) throw new HttpError(400, "Duda API isn't configured. Add DUDA_API_USERNAME and DUDA_API_PASSWORD in Vercel env.");
   const id = await idOf(ctx);
   const s = await one<{ duda_site_id: string | null; preview_url: string }>("SELECT duda_site_id, preview_url FROM sites WHERE id = ?", [id]);

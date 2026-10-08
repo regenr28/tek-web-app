@@ -10,7 +10,7 @@ const HANDOFF = "/api/websites/run/{id}/continue";
 
 /** Progress of the latest "check all" (and resumes it if its hand-off was lost). */
 export const GET = handle(async (req: Request) => {
-  await requireUser();
+  await requireUser("member", { area: "websites" });
   const r = await latestRun();
   if (r?.stale) { const token = await rotateRunToken(r.id); const h = makeHandOff(selfBase(req), HANDOFF); after(() => processRun(r.id, token, h)); }
   return Response.json({ run: r ? { ...r, status: r.stale ? "running" : r.status } : null });
@@ -20,7 +20,7 @@ const Body = z.union([z.object({ scope: z.enum(["published", "all"]) }).strict()
 
 /** Start checking every domain in the background, or stop. */
 export const POST = handle(async (req: Request) => {
-  const me = await requireUser("admin");
+  const me = await requireUser("admin", { area: "websites" });
   const b = await parseBody(req, Body);
   if ("action" in b) { await stopRun(); return Response.json({ ok: true }); }
   await rateLimit(`health-run:${me.id}`, 20, 3600);

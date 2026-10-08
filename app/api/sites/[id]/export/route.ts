@@ -10,7 +10,7 @@ const esc = (v: unknown) => {
 };
 
 export const GET = handle(async (req: Request, ctx: Ctx) => {
-  await requireUser();
+  await requireUser("member", { area: "projects" });
   const id = await idOf(ctx);
   const all_ = new URL(req.url).searchParams.get("all") === "1";
   const site = await one<{ name: string }>("SELECT name FROM sites WHERE id = ?", [id]);

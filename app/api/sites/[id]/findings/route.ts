@@ -3,7 +3,7 @@ import { handle, requireUser } from "@/lib/auth";
 import { idOf, type Ctx } from "@/lib/http";
 
 export const GET = handle(async (_req: Request, ctx: Ctx) => {
-  await requireUser();
+  await requireUser("member", { area: "projects" });
   const id = await idOf(ctx);
   const rows = await all(`
     SELECT f.*, a.name AS assignee_name, d.name AS done_by_name

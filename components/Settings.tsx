@@ -122,9 +122,12 @@ function AiSettings() {
   );
 }
 
+const ACCESS_OPTIONS: [string, string][] = [["websites", "All Websites only"], ["projects", "Projects only"], ["all", "Projects + All Websites"]];
+
 function Members({ me }: { me: Me }) {
   const [list, setList] = useState<(Member & { created_at: string; mfa_enabled?: number; last_login_at?: string | null })[]>([]);
-  const [f, setF] = useState({ name: "", email: "", password: "", role: "member" });
+  const blank = { name: "", email: "", password: "", role: "member", access: "websites" };
+  const [f, setF] = useState(blank);
   const [err, setErr] = useState(""); const [ok, setOk] = useState("");
   const load = () => api<(Member & { created_at: string })[]>("/api/users").then(setList);
   useEffect(() => { load(); }, []);
@@ -132,7 +135,8 @@ function Members({ me }: { me: Me }) {
 
   async function add(e: React.FormEvent) {
     e.preventDefault(); setErr(""); setOk("");
-    try { await api("/api/users", { body: f }); setOk(`Created ${f.email}. Share the temporary password privately — on first sign-in they must choose their own password and set up 2FA.`); setF({ name: "", email: "", password: "", role: "member" }); load(); }
+    const body = isSuper ? { ...f, access: f.role === "super_admin" ? "all" : f.access } : { name: f.name, email: f.email, password: f.password, role: f.role };
+    try { await api("/api/users", { body }); setOk(`Created ${f.email}. Share the temporary password privately — on first sign-in they must choose their own password and set up 2FA.`); setF(blank); load(); }
     catch (e) { setErr((e as Error).message); }
   }
   async function patch(id: number, b: Record<string, unknown>) {
@@ -158,13 +162,18 @@ function Members({ me }: { me: Me }) {
               {isSuper && <option value="super_admin">Super Admin — + AI keys & settings</option>}
             </select>
           </label>
+          {isSuper && f.role !== "super_admin" && <label className="field"><span>Can see</span>
+            <select value={f.access} onChange={(e) => setF({ ...f, access: e.target.value })}>
+              {ACCESS_OPTIONS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+            </select>
+          </label>}
         </div>
         <div><button className="primary">Add member</button></div>
         {err && <div className="alert error">{err}</div>}
         {ok && <div className="alert">{ok}</div>}
       </form>
       <table className="t">
-        <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>2FA</th><th>Last sign-in</th><th>Status</th><th></th></tr></thead>
+        <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Can see</th><th>2FA</th><th>Last sign-in</th><th>Status</th><th></th></tr></thead>
         <tbody>{list.map((u) => (
           <tr key={u.id} className={u.active ? "" : "done"}>
             <td>{u.name}{u.id === me.id && <span className="muted small"> (you)</span>}</td>
@@ -173,6 +182,12 @@ function Members({ me }: { me: Me }) {
               <select value={u.role} disabled={!isSuper || u.id === me.id} onChange={(e) => patch(u.id, { role: e.target.value })} style={{ width: 140 }}>
                 <option value="member">Member</option><option value="admin">Admin</option><option value="super_admin">Super Admin</option>
               </select>
+            </td>
+            <td>
+              {u.role === "super_admin" ? <span className="muted small">Everything</span>
+                : <select value={u.access || "all"} disabled={!isSuper || u.id === me.id} onChange={(e) => patch(u.id, { access: e.target.value })} style={{ width: 170 }} title="Which main areas this person can open">
+                  {ACCESS_OPTIONS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                </select>}
             </td>
             <td>{u.mfa_enabled ? <span className="badge ok">On</span> : <span className="badge warning">Off</span>}</td>
             <td className="small">{ago(u.last_login_at)}</td>

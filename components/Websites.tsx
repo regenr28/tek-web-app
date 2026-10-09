@@ -23,8 +23,12 @@ const STAGING = /\.(tekmetric\.site|shopgenie\.site|multiscreensite\.com|dudaone
 const day = (iso: string | null) => (iso ? iso.slice(0, 10) : "");
 const PAGE = 50;
 /** Overview groups: one tile each; "unhealthy" and "attention" have a second filter for the specific problem. */
-type Group = "" | "ok" | "unhealthy" | "attention" | "unchecked" | "launch";
+type Group = "" | "ok" | "unhealthy" | "attention" | "unchecked" | "launch" | "uptime";
 const UNHEALTHY = ["redirect", "moved", "taken", "parked", "not_found", "error", "dns", "ssl", "down"];
+/** Uptime counts "active" sites only. These mean the customer's domain is gone or no longer points to us — not an outage. */
+const LOST = ["parked", "dns", "taken", "moved", "redirect"];
+/** Counted sites that don't load right now — the outages. */
+const OUTAGE = ["down", "error", "ssl", "not_found"];
 const WARNINGS = ["domain_expiring", "domain_hold", "ssl_expiring", "gbp_other", "gbp_none", "slow", "other_duda_site", "changed", "missing"];
 const LAUNCH: Record<string, string> = { not_launched: "Not published yet", temp_domain: "Live only on the temporary domain", billing_failed: "Duda billing failed" };
 /** colour of one check result in the uptime strip */
@@ -32,7 +36,7 @@ const DOT: Record<string, string> = { ok: "var(--ok)", down: "var(--error)", dns
 function Strip({ list, size = 8, title }: { list: string[]; size?: number; title?: string }) {
   return <span title={title} style={{ display: "inline-flex", gap: 2, verticalAlign: "middle" }}>{list.map((h, i) => <span key={i} title={h} style={{ width: size, height: size * 1.6, borderRadius: 2, background: DOT[h] || "var(--warning)", opacity: DOT[h] ? 1 : 0.7 }} />)}</span>;
 }
-type Filters = { q: string; status: string; group: Group; problem: string; warning: string; launch?: string; labels: string[]; labelMode: "any" | "all"; template: string; domainType: string; createdFrom: string; createdTo: string; firstFrom: string; firstTo: string; lastFrom: string; lastTo: string };
+type Filters = { q: string; status: string; group: Group; problem: string; warning: string; launch?: string; uptime?: "below" | "down" | "lost"; labels: string[]; labelMode: "any" | "all"; template: string; domainType: string; createdFrom: string; createdTo: string; firstFrom: string; firstTo: string; lastFrom: string; lastTo: string };
 const EMPTY: Filters = { q: "", status: "", group: "", problem: "", warning: "", labels: [], labelMode: "any", template: "", domainType: "", createdFrom: "", createdTo: "", firstFrom: "", firstTo: "", lastFrom: "", lastTo: "" };
 const isTemplate = (l: string) => /^\d{1,3}$/.test(l);
 /** The filters in use, in words (shown on the history chart and in its PDF / Excel). */
@@ -110,26 +114,36 @@ export default function Websites() {
   const groupOf = (r: Row): Group => (r.health === "ok" ? "ok" : UNHEALTHY.includes(r.health) ? "unhealthy" : "unchecked");
   const shown = useMemo(() => base.filter((r) => {
     if (f.group === "launch") return r.launch_flags.length > 0 && (!f.launch || r.launch_flags.includes(f.launch));
+    if (f.group === "uptime") {
+      if (f.uptime === "down") return OUTAGE.includes(r.health);
+      if (f.uptime === "lost") return LOST.includes(r.health);
+      return r.uptime_pct !== null && r.uptime_pct < 100 && !LOST.includes(r.health);
+    }
     if (f.group === "attention") { const w = warningsOf(r); return w.length > 0 && (!f.warning || w.includes(f.warning)); }
     if (f.group && groupOf(r) !== f.group) return false;
     if (f.group === "unhealthy" && f.problem && r.health !== f.problem) return false;
     return true;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [base, f.group, f.problem, f.warning, f.launch]);
+  }), [base, f.group, f.problem, f.warning, f.launch, f.uptime]);
 
   const counts = useMemo(() => {
     const h: Record<string, number> = {}, w: Record<string, number> = {}, lf: Record<string, number> = {};
-    let attention = 0, launch = 0, upSum = 0, upN = 0;
+    let attention = 0, launch = 0, upSum = 0, upN = 0, below = 0, maxChecks = 0, notCounted = 0;
     for (const r of base) {
       if (r.launch_flags.length) { launch++; for (const x of r.launch_flags) lf[x] = (lf[x] || 0) + 1; }
-      if (r.uptime_pct !== null) { upSum += r.uptime_pct; upN++; }
+      // uptime: active sites only (a lost / moved domain isn't downtime)
+      if (r.uptime_pct !== null && !LOST.includes(r.health)) { upSum += r.uptime_pct; upN++; if (r.uptime_pct < 100) below++; }
+      else if (!LOST.includes(r.health)) notCounted++;
+      maxChecks = Math.max(maxChecks, r.uptime_checks || 0);
       h[r.health] = (h[r.health] || 0) + 1;
       const ws = warningsOf(r);
       if (ws.length) attention++;
       for (const x of ws) w[x] = (w[x] || 0) + 1;
     }
     const unhealthy = UNHEALTHY.reduce((n, k) => n + (h[k] || 0), 0);
-    return { h, w, attention, unhealthy, unchecked: (h.unchecked || 0) + (h.skipped || 0), launch, lf, avgUptime: upN ? Math.round((upSum / upN) * 10) / 10 : null };
+    const sum = (ks: string[]) => ks.reduce((n, k) => n + (h[k] || 0), 0);
+    return { h, w, attention, unhealthy, unchecked: (h.unchecked || 0) + (h.skipped || 0), launch, lf, avgUptime: upN ? Math.round((upSum / upN) * 10) / 10 : null,
+      up: { counted: upN, below, maxChecks, notCounted, outage: sum(OUTAGE), lost: sum(LOST) } };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [base]);
 
@@ -162,7 +176,8 @@ export default function Websites() {
 
   if (!d) return <p className="muted">{err || "Loading…"}</p>;
   const L = d.healthLabels;
-  const ordered = f.group === "launch" ? [...shown].sort((a, b) => (b.launch_days ?? -1) - (a.launch_days ?? -1)) : shown;
+  const ordered = f.group === "launch" ? [...shown].sort((a, b) => (b.launch_days ?? -1) - (a.launch_days ?? -1))
+    : f.group === "uptime" ? [...shown].sort((a, b) => (a.uptime_pct ?? 101) - (b.uptime_pct ?? 101)) : shown;
   const pageRows = ordered.slice(page * PAGE, page * PAGE + PAGE);
   const wLabel = (k: string) => (k === "changed" ? "Health changed since a previous check" : k === "missing" ? "Not in the latest import (deleted in Duda?)" : d.flagLabels[k] || k);
   const tile = (g: Group, label: string, n: number, tone: string, hint: string) => {
@@ -229,8 +244,17 @@ export default function Websites() {
         {tile("unchecked", "Not checked", counts.unchecked, "", "Not checked yet, or not published in Duda")}
         {tile("launch", "Launch tracker", counts.launch, counts.launch ? "warning" : "", `Paid for but maybe not really live: not published ${d.settings.notLiveDays}+ days after creation, or published but only on the temporary tekmetric.site address for ${d.settings.tempDomainDays}+ days, or Duda billing failed`)}
         <button className="stat" onClick={flipHistory} title="Sites created, first published and unpublished for good — per week, month or year" style={{ textAlign: "left", cursor: "pointer", minWidth: 150, border: showHistory ? "2px solid var(--accent)" : "2px solid transparent" }}><b>📈</b><span>{showHistory ? "Hide history" : "History chart"}</span></button>
-        {counts.avgUptime !== null && <div className="stat" title="Average uptime of the checked sites over the last 30 days (from the scheduled checks)" style={{ minWidth: 150 }}><b style={{ color: counts.avgUptime >= 99 ? "var(--ok)" : "var(--warning)" }}>{counts.avgUptime}%</b><span>Avg uptime (30 days)</span></div>}
+        {counts.avgUptime !== null && (
+          <button className="stat" onClick={() => setF((x) => ({ ...x, group: x.group === "uptime" ? "" : "uptime", uptime: "below", problem: "", warning: "", launch: "" }))}
+            title="Average uptime of active sites over the last 30 days. Domains that were lost or moved away aren't counted. Click to see what's behind the number."
+            style={{ textAlign: "left", cursor: "pointer", minWidth: 190, border: f.group === "uptime" ? "2px solid var(--accent)" : "2px solid transparent" }}>
+            <b style={{ color: counts.avgUptime >= 99 ? "var(--ok)" : "var(--warning)" }}>{counts.avgUptime}%</b>
+            <span>Uptime · active sites (30 days)</span>
+            <span className="muted" style={{ fontSize: 11 }}>{counts.up.counted.toLocaleString()} sites · what&apos;s behind it ›</span>
+          </button>
+        )}
       </div>
+      {f.group === "uptime" && <UptimeExplainer c={counts.up} h={counts.h} avg={counts.avgUptime} L={L} pick={(u) => setF({ ...f, uptime: u })} active={f.uptime || "below"} />}
       {showHistory && <SitesHistory rows={base} filters={describeFilters(f)} />}
       {f.group === "launch" && (
         <div className="row small" style={{ flexWrap: "wrap", gap: 6 }}>
@@ -318,6 +342,41 @@ export default function Websites() {
         )}
         <div className="row" style={{ justifyContent: "flex-end", marginTop: 8 }}><Pager page={page} total={shown.length} set={setPage} /></div>
       </div>
+    </div>
+  );
+}
+
+/** What the uptime number is made of — so it can be explained (and checked) site by site. */
+function UptimeExplainer({ c, h, avg, L, pick, active }: {
+  c: { counted: number; below: number; maxChecks: number; notCounted: number; outage: number; lost: number }; h: Record<string, number>; avg: number | null;
+  L: Record<string, string>; pick: (u: "below" | "down" | "lost") => void; active: string;
+}) {
+  const parts = (ks: string[]) => ks.filter((k) => h[k]).map((k) => `${L[k] || k} ${h[k].toLocaleString()}`).join(" · ");
+  const row = (key: "below" | "down" | "lost" | "", label: React.ReactNode, n: number, detail: string, tone: string) => (
+    <tr style={{ fontWeight: active === key ? 600 : 400 }}>
+      <td>{label}</td>
+      <td style={{ textAlign: "right" }}><b style={{ color: tone }}>{n.toLocaleString()}</b></td>
+      <td className="muted">{detail}</td>
+      <td>{key && n > 0 && <button className={`sm ${active === key ? "primary" : ""}`} onClick={() => pick(key)}>{active === key ? "Shown below" : "Show"}</button>}</td>
+    </tr>
+  );
+  return (
+    <div className="card stack small" style={{ boxShadow: "none", gap: 8 }}>
+      <div><b>What&apos;s behind {avg ?? "—"}% uptime</b></div>
+      <div className="muted">
+        Every scheduled check marks a site <b>up</b> (it loads and is live on Duda) or <b>down</b> (it doesn&apos;t load). Each site&apos;s uptime is its up-checks ÷ all checks over the last 30 days; the tile is the average of the active sites.
+        {c.maxChecks > 0 && c.maxChecks < 14 && <> <b>History is still short</b> — at most {c.maxChecks} check{c.maxChecks > 1 ? "s" : ""} per site so far, so a site that failed once shows a low % and pulls the average down. It settles as daily checks build up.</>}
+      </div>
+      <table className="t small" style={{ maxWidth: 980 }}>
+        <tbody>
+          {row("", "Counted — active sites", c.counted, `average ${avg ?? "—"}%`, "var(--text)")}
+          {row("below", "…of which below 100%", c.below, "had at least one failed check in 30 days — sorted lowest first", c.below ? "var(--warning)" : "var(--ok)")}
+          {row("down", "…of which not loading right now", c.outage, parts(OUTAGE) || "none", c.outage ? "var(--error)" : "var(--ok)")}
+          {row("lost", "Not counted — domain lost or left Duda", c.lost, parts(LOST) || "none", "var(--muted)")}
+          {row("", "Not counted — no checks yet / not published", c.notCounted, "they join once they've been checked", "var(--muted)")}
+        </tbody>
+      </table>
+      <div className="muted">Open any site below for its check history, incidents and the exact error.</div>
     </div>
   );
 }

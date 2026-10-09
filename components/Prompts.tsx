@@ -9,7 +9,7 @@ type ServicePage = Gen & { sections: { label: string; title: string; content: st
 type RedirectRow = { from: string; to: string; type: string; why?: string };
 type View = {
   onePager: boolean; template: string | null; projectType: string | null; vars: Record<string, string>; services: string[];
-  metaPagesDefault: string[]; oldUrlsDefault: string; destUrlDefault: string; domain: string;
+  metaPagesDefault: string[]; oldUrlsDefault: string; destUrlDefault: string; domain: string; serviceAreas: { list: string[]; from: "you" | "website" | "" };
   location: (Gen & { text: string; cities: string[] }) | null;
   faq: (Gen & { variant: string; text: string }) | null;
   meta: (Gen & { pages: string[]; rows: MetaRow[]; text: string; csv: string }) | null;
@@ -125,9 +125,21 @@ function Vars({ v, keys }: { v: View; keys: string[] }) {
 /* ---------- Location ---------- */
 
 function LocationPanel({ v, busy, gen, edit }: P) {
+  const [areas, setAreas] = useState(v.serviceAreas.list.join("\n"));
+  useEffect(() => setAreas(v.serviceAreas.list.join("\n")), [v.serviceAreas]);
+  const changed = areas.trim() !== v.serviceAreas.list.join("\n").trim();
   return (
     <div className="card stack" style={{ boxShadow: "none" }}>
-      <Head title="Our location" help="Intro for the location section + 24 nearby cities with their counties." label="Write location content" busy={busy === "location"} done={v.location} gen={() => gen("location", { kind: "location" })} />
+      <Head title="Our location" help="Intro for the location section + 24 nearby cities with their counties. The shop's own service area goes first." label="Write location content" busy={busy === "location"} done={v.location} gen={() => gen("location", { kind: "location" })} />
+      <label className="field"><span>Service area — cities they cover ({v.serviceAreas.list.length}{v.serviceAreas.from === "website" ? ", read from their website" : v.serviceAreas.from === "you" ? ", entered by you" : ""})</span>
+        <textarea rows={Math.min(8, Math.max(3, areas.split("\n").length + 1))} value={areas} onChange={(e) => setAreas(e.target.value)}
+          placeholder={"Paste the list from their Facebook page (About → service area) or website, e.g.\nElburn, IL · North Aurora, IL · Batavia, IL · Geneva, IL"} />
+        <span className="row small" style={{ gap: 6 }}>
+          <button className="sm" disabled={!changed} onClick={() => edit({ serviceAreas: areas })}>Save service area</button>
+          {v.serviceAreas.from === "you" && <button className="sm ghost" onClick={() => edit({ serviceAreas: null })}>Use what research found</button>}
+          <span className="muted">These cities are listed first, in this order; the rest of the 24 are the nearest other towns.</span>
+        </span>
+      </label>
       <Vars v={v} keys={["Shop_Name", "City_State", "Vehicles_Serviced", "Certifications", "Warranty"]} />
       {v.location && <>
         <Issues list={v.location.issues} />

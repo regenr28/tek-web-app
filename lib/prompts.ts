@@ -28,7 +28,7 @@ export const PROMPT_INFO: { key: PromptKey; label: string; help: string }[] = [
 export const VARIABLES: [string, string][] = [
   ["Shop_Name", "Shop name"], ["City_State", "City, State"], ["Shop_Location", "Full address(es)"], ["Shop_Hours", "Shop hours"],
   ["Vehicles_Serviced", "Vehicles serviced"], ["Certifications", "Certifications"], ["Warranty", "Warranties"], ["Services", "Service topics"],
-  ["Requested_Pages", "Requested pages/sections"], ["Website_Type", "Website type"], ["Service_Page", "The service being written (service pages)"],
+  ["Requested_Pages", "Requested pages/sections"], ["Service_Areas", "Cities the shop covers (Location tab → Service areas)"], ["Website_Type", "Website type"], ["Service_Page", "The service being written (service pages)"],
   ["Meta_Pages", "Pages for meta (meta prompt)"], ["Old_URLs", "Old page URLs (redirects)"], ["Destination_URLs", "New site pages (redirects)"],
 ];
 
@@ -269,6 +269,8 @@ export type RedirectRow = { from: string; to: string; type: string; why?: string
 export type PromptState = {
   /** Service topics for the homepage Services section and the service pages (default: Data Collection → Primary Services) */
   services?: string[];
+  /** Cities the shop says it covers (Facebook "service area", their website) — listed first in the Location section */
+  serviceAreas?: string[];
   location?: Gen & { text: string; cities: string[] };
   faq?: Gen & { variant: "faqPages" | "faqSections"; items: FaqItem[]; text: string };
   meta?: Gen & { pages: string[]; rows: MetaRow[] };
@@ -293,7 +295,21 @@ export function isOnePager(row: Pick<ProjectRow, "project_type" | "template">) {
 const lines = (s: string) => splitLinesKeep(s).map((x) => x.replace(/^[-•*]\s*/, ""));
 export function defaultServices(c: Collection) { return lines(c.fields.services.value).slice(0, 30); }
 
-export function promptVars(c: Collection, row: Pick<ProjectRow, "project_type" | "template">, services?: string[]): Record<string, string> {
+/** Cities the shop says it covers: what the team typed on the Location tab, else what research read on their website. */
+export function serviceAreasOf(st: PromptState, ev: { website?: { signals?: Record<string, unknown> } }): { list: string[]; from: "you" | "website" | "" } {
+  if (st.serviceAreas?.length) return { list: st.serviceAreas, from: "you" };
+  const w = (ev.website?.signals?.serviceAreas as string[] | undefined) || [];
+  return { list: w, from: w.length ? "website" : "" };
+}
+/** "Elburn, IL · North Aurora, IL · Batavia" (pasted from Facebook) → one city per item. */
+export function splitAreas(text: string): string[] {
+  const parts = text.split(/\n|\s[·•|]\s|;|(?<=,\s?[A-Z]{2})\s*,\s*|(?<=\b[A-Z]{2})\s+(?=[A-Z][a-z])/).map((x) => x.replace(/^[-•*\d.)\s]+/, "").replace(/\s+/g, " ").trim()).filter(Boolean);
+  const out: string[] = [];
+  for (const p of parts) if (p.length <= 60 && !out.some((o) => o.toLowerCase() === p.toLowerCase())) out.push(p);
+  return out.slice(0, 40);
+}
+
+export function promptVars(c: Collection, row: Pick<ProjectRow, "project_type" | "template">, services?: string[], areas?: string[]): Record<string, string> {
   const locs = c.locations;
   const each = (fn: (i: number) => string) => locs.map((L, i) => `${L.city ? `${L.city}, ${L.state}: ` : ""}${fn(i)}`).filter((x) => x.trim()).join("\n");
   return {
@@ -306,6 +322,7 @@ export function promptVars(c: Collection, row: Pick<ProjectRow, "project_type" |
     Warranty: lines(c.fields.warranties.value).join("; "),
     Services: (services?.length ? services : defaultServices(c)).join(", "),
     Requested_Pages: c.pages.join(", "),
+    Service_Areas: (areas || []).join(", "),
     Website_Type: isOnePager(row) ? "One-page site (sections, no separate pages)" : row.project_type === "mso" ? "MSO multi-page site" : "Multi-page site",
   };
 }
@@ -356,16 +373,21 @@ async function project(siteId: number) {
   if (!p.jira && !p.collection.fields.shopName.value) throw new HttpError(400, "Import the Jira export and fill the Data Collection first");
   const st = await getPromptState(siteId);
   const prompts = await getPrompts();
-  const vars = promptVars(p.collection, p.row, st.services);
-  return { p, c: p.collection, row: p.row, st, prompts, vars };
+  const areas = serviceAreasOf(st, p.evidence);
+  const vars = promptVars(p.collection, p.row, st.services, areas.list);
+  return { p, c: p.collection, row: p.row, st, prompts, vars, areas };
 }
 
 /* ---------------- Location ---------------- */
 
 export async function genLocation(siteId: number, rev?: Rev) {
-  const { c, st, prompts, vars } = await project(siteId);
+  const { c, st, prompts, vars, areas } = await project(siteId);
   const shopCity = (c.locations[0]?.city || c.fields.cityState.value.split(",")[0] || "").trim().toLowerCase();
-  const user = `SHOP DETAILS:\n${details(c)}\n\nMY PROMPT:\n${fillPrompt(prompts.location, vars)}
+  const st2 = (c.locations[0]?.state || c.fields.cityState.value.split(",")[1] || "").trim().slice(0, 2).toUpperCase();
+  // the shop's own service area comes first (minus the shop's own city, which the intro already names)
+  const priority = areas.list.map((a) => (/,\s*[A-Z]{2}\b/.test(a) ? a : st2 ? `${a}, ${st2}` : a)).filter((a) => cityKey(a) !== cityKey(shopCity));
+  const areaBlock = priority.length ? `\n\nSERVICE AREA — the shop says it covers these cities (${areas.from === "you" ? "from its Facebook page / the team" : "from its website"}). List them FIRST, in this order, each with its county, then add the nearest other towns until there are 24:\n${priority.join("\n")}` : "";
+  const user = `SHOP DETAILS:\n${details(c)}\n\nMY PROMPT:\n${fillPrompt(prompts.location, vars)}${areaBlock}
 
 Return ONLY JSON: {"paragraphs":["intro paragraph","second paragraph"],"cities":["City, ST (County Name County)"]}
 - paragraphs: the section text (same idea as the reference, completely new wording, about this shop).
@@ -380,8 +402,21 @@ Return ONLY JSON: {"paragraphs":["intro paragraph","second paragraph"],"cities":
       cities = cleanCities([...cities, ...(parseJson<{ cities?: string[] }>(more.text)?.cities || [])], shopCity);
     } catch { /* keep what we have */ }
   }
+  // service-area cities first, in the shop's order (added when the AI left one out — then its county needs checking)
+  let areaMissing: string[] = [];
+  if (priority.length) {
+    const first: string[] = [], missing: string[] = [];
+    for (const a of priority) {
+      const hit = cities.find((x) => cityKey(x) === cityKey(a));
+      if (hit) first.push(hit); else { first.push(a); missing.push(a); }
+    }
+    cities = [...first, ...cities.filter((x) => !first.some((f) => cityKey(f) === cityKey(x)))];
+    areaMissing = missing;
+  }
   cities = cities.slice(0, 24);
   const issues: string[] = [];
+  if (areaMissing.length) issues.push(`Add the county for: ${areaMissing.join("; ")} (service-area cities the AI didn't list)`);
+  if (priority.length) issues.unshift(`The first ${Math.min(24, priority.length)} cities are the shop's own service area (${areas.from === "you" ? "entered on this tab" : "read from their website"}).`);
   if (!paras.length) issues.push("No intro text came back");
   if (cities.length !== 24) issues.push(`${cities.length} cities (needs 24)`);
   const bad = cities.filter((x) => !/^[^,]+, [A-Z]{2} \(.+\b(County|Parish|Borough|Census Area|Municipality)\)$/.test(x));
@@ -392,11 +427,14 @@ Return ONLY JSON: {"paragraphs":["intro paragraph","second paragraph"],"cities":
   await savePromptState(siteId, st);
   return st.location;
 }
+/** "St. Charles, IL (Kane County)" → "saint charles" (for comparing city names). */
+const cityKey = (s: string) => s.split(/[,(]/)[0].toLowerCase().replace(/\bst\.?\s+/g, "saint ").replace(/\bft\.?\s+/g, "fort ").replace(/\bmt\.?\s+/g, "mount ").replace(/[^a-z ]/g, "").replace(/\s+/g, " ").trim();
+
 function cleanCities(list: unknown[], shopCity: string) {
   const out: string[] = [];
   for (const x of list) {
     const s = String(x).replace(/^[-•*\d.)\s]+/, "").replace(/\s+/g, " ").trim();
-    if (!s || s.split(",")[0].trim().toLowerCase() === shopCity) continue;
+    if (!s || cityKey(s) === cityKey(shopCity)) continue;
     if (!out.some((o) => o.split("(")[0].trim().toLowerCase() === s.split("(")[0].trim().toLowerCase())) out.push(s);
   }
   return out;

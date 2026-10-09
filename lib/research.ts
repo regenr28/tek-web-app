@@ -504,6 +504,40 @@ function warrantySentences(text: string, url: string): string[] {
     .slice(0, 4).map((x) => `${x.trim()} (${url})`);
 }
 
+/** "Proudly serving Elburn, Batavia, Geneva and St. Charles, IL" → ["Elburn", "Batavia", "Geneva", "St. Charles, IL"]. */
+export function serviceAreaNames(text: string): string[] {
+  const out: string[] = [];
+  const lead = /(?:proudly\s+serv(?:e|es|ing)|we\s+serve|serving(?:\s+(?:customers|drivers|residents)\s+(?:in|from|throughout))?|service\s+areas?|areas?\s+we\s+serve|communities\s+we\s+serve|also\s+serv(?:e|es|ing))\s*(?:the\s+)?(?:areas?\s+of\s+|communities\s+of\s+|cities\s+of\s+)?[:\-–—]?\s*/gi;
+  for (const m of text.matchAll(lead)) {
+    const tail = text.slice(m.index! + m[0].length, m.index! + m[0].length + 260).split(/(?<!\b(?:St|Ft|Mt))[.!?;]\s|\n|\s{3,}/)[0];
+    for (let part of tail.split(/,(?!\s*[A-Z]{2}\b)\s*|\s+(?:and|&|or)\s+|\s*[•·|/]\s*/)) {
+      part = part.replace(/^(?:the\s+)?(?:greater\s+)?/i, "").replace(/\s+(?:area|areas|and surrounding.*|& surrounding.*|surrounding.*)$/i, "").trim();
+      const mm = part.match(/^((?:(?:St|Ft|Mt)\.?\s+)?[A-Z][a-z]+(?:[ -][A-Z][a-z]+){0,2})(?:,?\s+([A-Z]{2}))?$/);
+      if (!mm || /^(Our|We|You|Your|All|Auto|Car|Cars|Vehicles?|Customers?|Drivers?|Residents?|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|The|Quality|Since|Every|Each)$/i.test(mm[1])) continue;
+      const name = mm[2] ? `${mm[1]}, ${mm[2]}` : mm[1];
+      if (!out.some((o) => o.toLowerCase() === name.toLowerCase())) out.push(name);
+    }
+    if (out.length >= 30) break;
+  }
+  return out.slice(0, 30);
+}
+
+/** Consumer-financing providers shops mention ("Financing options through Affirm"). */
+const FINANCE_PROVIDERS: [string, RegExp][] = [
+  ["Affirm", /\baffirm\b/i], ["Synchrony Car Care", /synchrony|car ?care(?:one)?\b/i], ["Snap Finance", /snap ?finance|\bsnap\b(?= (?:finance|financing))/i],
+  ["Acima", /\bacima\b/i], ["Sunbit", /\bsunbit\b/i], ["Klarna", /\bklarna\b/i], ["Afterpay", /\bafterpay\b/i], ["PayPal Credit", /paypal credit|pay ?pal pay in/i],
+  ["Koalafi", /\bkoalafi\b/i], ["Progressive Leasing", /progressive leasing/i], ["Uown", /\buown\b/i], ["Katapult", /\bkatapult\b/i], ["Easypay Finance", /easy ?pay finance/i],
+  ["DigniFi", /\bdignifi\b/i], ["Wisetack", /\bwisetack\b/i], ["Bread Pay", /bread ?pay/i], ["GreenSky", /\bgreensky\b/i],
+];
+/** Sentences about financing / payment plans (with the page they came from). */
+export function financingSentences(text: string, url: string): string[] {
+  return text.split(/(?<=[.!?])\s+(?=[A-Z0-9"“])|\s{2,}|\s[•|·]\s/)
+    .map((x) => x.trim())
+    .filter((x) => x.length >= 12 && x.length <= 320 && (/\bfinanc(e|ing)\b|payment plans?|pay over time|buy now,? pay later|no credit (?:check|needed)|lease[- ]to[- ]own/i.test(x) || FINANCE_PROVIDERS.some(([, re]) => re.test(x) && /financ|pay|credit|option|plan|apply|approv/i.test(x))))
+    .slice(0, 4).map((x) => `${x} (${url})`);
+}
+export const financeProviders = (lines: string[]) => FINANCE_PROVIDERS.filter(([, re]) => lines.some((l) => re.test(l.replace(/\s\(https?:[^)]*\)$/, "")))).map(([n]) => n);
+
 /** Files and non-page links that aren't part of the site's page list. */
 const NOT_A_PAGE = /\.(jpe?g|png|gif|webp|svg|ico|bmp|tiff?|pdf|docx?|xlsx?|pptx?|zip|rar|mp[34]|mov|avi|webm|wav|css|js|json|xml|txt|woff2?|ttf|eot)$/i;
 const TRACKING = /^(utm_[a-z]+|fbclid|gclid|msclkid|mc_[a-z]+|_ga|ref)$/i;
@@ -594,6 +628,8 @@ export async function stepWebsite(c: Collection, ev: Evidence): Promise<string> 
   }
   const pages = [{ url: home.url, title, text: homeText.slice(0, 5000) }];
   const warranty: string[] = warrantySentences(homeText, home.url);
+  const financing: string[] = financingSentences(homeText, home.url);
+  const areas: string[] = serviceAreaNames(homeText);
   const sub = await Promise.allSettled(picked.slice(0, 10).map(async (p) => {
     const r = await get(p.url);
     if (r.status >= 400 || !r.html) return null;
@@ -601,6 +637,8 @@ export async function stepWebsite(c: Collection, ev: Evidence): Promise<string> 
     $$("a[href]").each((_, a) => { const h = $$(a).attr("href") || ""; addUrl(h, r.url); try { const x = new URL(h, r.url).toString(); if (programOf(x)) programLinks.add(x); } catch { /* skip */ } });
     const text = pageText($$);
     warranty.push(...warrantySentences(text, r.url));
+    financing.push(...financingSentences(text, r.url));
+    areas.push(...serviceAreaNames(text));
     // keep the part of a long page that talks about warranties/financing/coupons
     const focus = text.search(/warrant|guarantee|financ|coupon|special offer/i);
     const body = text.length > 5000 && focus > 2500 ? text.slice(0, 2000) + " … " + text.slice(Math.max(0, focus - 800), focus + 2200) : text.slice(0, 5000);
@@ -619,12 +657,17 @@ export async function stepWebsite(c: Collection, ev: Evidence): Promise<string> 
       if (r.status >= 400 || !r.html) return;
       const $$ = cheerio.load(r.html);
       $$("a[href]").each((_, a) => { addUrl($$(a).attr("href") || "", r.url); });
+      // these pages aren't stored, but a warranty / financing sentence on them still counts
+      const text = pageText($$);
+      warranty.push(...warrantySentences(text, r.url));
+      financing.push(...financingSentences(text, r.url));
+      areas.push(...serviceAreaNames(text));
     }));
     void found;
   }
   const urls = [...allUrls].sort((a, b) => a.length - b.length || a.localeCompare(b)).slice(0, 1000);
 
-  const signals = { copyrightYear, brandMatch, redirectedTo: domainOf(home.url) !== domainOf(start) ? home.url : null, title, pagesRead: pages.length, warranty: uniqLines(warranty).slice(0, 8), urlCount: urls.length, programLinks: [...programLinks].slice(0, 10) };
+  const signals = { copyrightYear, brandMatch, redirectedTo: domainOf(home.url) !== domainOf(start) ? home.url : null, title, pagesRead: pages.length, warranty: uniqLines(warranty).slice(0, 8), financing: uniqLines(financing).slice(0, 8), serviceAreas: uniqLines(areas).slice(0, 30), urlCount: urls.length, programLinks: [...programLinks].slice(0, 10) };
   ev.website = { url: start, finalUrl: home.url, pages, socials: [...socials], signals, at: now(), urls };
 
   const issues: string[] = [];
@@ -651,6 +694,13 @@ export async function stepWebsite(c: Collection, ev: Evidence): Promise<string> 
   if (newCerts.length) patch(c, "certifications", { note: `Their website also mentions: ${newCerts.join(", ")} (not added — confirm).`, source: "website", status: "review" });
   if (signals.warranty.length && (!c.fields.warranties.value.trim() || c.fields.warranties.source !== "jira") && !c.fields.warranties.manual)
     patch(c, "warranties", { note: `Their website mentions: ${signals.warranty.slice(0, 3).join(" · ")}`, source: "website", status: "review" });
+  // Financing stated on their own site (e.g. "Financing options through Affirm" on the About page)
+  if (signals.financing.length && !c.fields.financing.manual && (!c.fields.financing.value.trim() || c.fields.financing.source !== "jira")) {
+    const providers = financeProviders(signals.financing);
+    c.fields.financing.note = c.fields.financing.note.split("\n").filter((l) => !/no financing (information )?(found|listed|mentioned)/i.test(l)).join("\n");
+    patch(c, "financing", { value: c.fields.financing.value.trim() ? undefined : providers.length ? providers.join("\n") : undefined,
+      note: `Their website says: ${signals.financing.slice(0, 2).join(" · ")}`, source: "website", status: "review" });
+  }
   composeSocials(c, ev);
   return `Read ${pages.length} page(s) from ${domainOf(home.url)} · ${urls.length} internal URL(s) found${signals.warranty.length ? " · warranty text found" : ""}`;
 }
@@ -764,8 +814,10 @@ function locInfos(c: Collection): LocInfo[] {
 }
 const reEsc = (x: string) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 /** Which details of the shop a search result / listing shows (phone, street, ZIP, city + state). */
+/** "St. Charles" = "Saint Charles", "Ft. Worth" = "Fort Worth". */
+const placeNorm = (s: string) => s.toLowerCase().replace(/\bst\.?\s+(?=[a-z])/g, "saint ").replace(/\bft\.?\s+(?=[a-z])/g, "fort ").replace(/\bmt\.?\s+(?=[a-z])/g, "mount ");
 function matchSignals(text: string, L: LocInfo): { strong: string[]; cityOnly: boolean } {
-  const t = ` ${text.toLowerCase().replace(/[-_+]/g, " ")} `;
+  const t = ` ${placeNorm(text.replace(/[-_+]/g, " "))} `;
   const strong: string[] = [];
   const ph = digits(L.phone);
   if (ph.length === 10 && text.replace(/\D/g, "").includes(ph)) strong.push(`the same phone ${L.phone}`);
@@ -775,7 +827,7 @@ function matchSignals(text: string, L: LocInfo): { strong: string[]; cityOnly: b
   if (num && word && new RegExp(`\\b${num}\\b`).test(t) && t.includes(word.toLowerCase().replace(/\.$/, ""))) strong.push(`the same street address (${street})`);
   const zip = L.address.match(/\b\d{5}\b(?!.*\b\d{5}\b)/)?.[0];
   if (zip && new RegExp(`\\b${zip}\\b`).test(t)) strong.push(`the same ZIP ${zip}`);
-  const cityHit = !!L.city && new RegExp(`\\b${reEsc(L.city.toLowerCase())}\\b`).test(t);
+  const cityHit = !!L.city && new RegExp(`\\b${reEsc(placeNorm(L.city))}\\b`).test(t);
   const stateHit = !!L.state && (new RegExp(`\\b${L.state.toLowerCase()}\\b`).test(t) || (!!STATE_NAMES[L.state] && t.includes(STATE_NAMES[L.state].toLowerCase())));
   if (cityHit && stateHit) strong.push(`${L.city}, ${L.state}`);
   return { strong, cityOnly: cityHit && !stateHit && !strong.length };
@@ -795,11 +847,16 @@ function locationIndexFor(c: Collection, text: string) {
   return hits.length === 1 ? hits[0].i : -1;
 }
 /** Opens each page (directly, or through Groq's browser when the site blocks us) and checks it shows this shop. */
-async function confirmListings(c: Collection, list: WebResult[]): Promise<Record<string, { loc: number; reason: string }>> {
+async function confirmListings(c: Collection, list: WebResult[], host = ""): Promise<Record<string, { loc: number; reason: string }>> {
   const out: Record<string, { loc: number; reason: string }> = {};
   if (!list.length) return out;
   const locs = locInfos(c);
-  const check = (text: string) => { let best = { s: [] as string[], loc: -1 }; locs.forEach((L, i) => { const m = matchSignals(text, L); if (m.strong.length > best.s.length) best = { s: m.strong, loc: i }; }); return best; };
+  const check = (text: string) => {
+    let best = { s: [] as string[], loc: -1 };
+    locs.forEach((L, i) => { const m = matchSignals(text, L); if (m.strong.length > best.s.length) best = { s: m.strong, loc: i }; });
+    if (host && text.toLowerCase().includes(host)) best = { s: [...best.s, `a link to their website ${host}`], loc: Math.max(0, best.loc) };
+    return best;
+  };
   const left: WebResult[] = [];
   await Promise.all(list.map(async (r) => {
     try {
@@ -818,7 +875,7 @@ async function confirmListings(c: Collection, list: WebResult[]): Promise<Record
   try {
     const text = await groqBrowserSearch(`Open each of these pages and check whether it is the listing/profile of this auto repair shop: ${shops}.
 Pages:\n${left.map((r) => `- ${r.url}`).join("\n")}
-For each page copy the exact address and/or phone number it shows. Return ONLY JSON: {"pages":[{"url":"","shows":"exact address or phone text from the page, or empty if none"}]}`);
+For each page copy the exact address, phone number and website link it shows${host ? ` (their website is ${host})` : ""}. If a page doesn't exist, leave "shows" empty. Return ONLY JSON: {"pages":[{"url":"","shows":"exact address / phone / website text from the page, or empty if none"}]}`);
     const j = parseJson<{ pages?: { url: string; shows: string }[] }>(text);
     for (const pg of j?.pages || []) {
       const r = left.find((x) => x.url === pg.url || profileOf(x.url)?.key === profileOf(pg.url || "")?.key);
@@ -889,8 +946,41 @@ Return ONLY JSON: {"established":"YYYY or empty","experience":"e.g. over 25 year
 
 // ---------- 3. Web & social search ----------
 
+/* ---------- who is this shop online? (identity evidence for social profiles) ---------- */
+
+const squash = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+const GENERIC_WORDS = /auto(motive)?|repair|service|services|tires?|car|cars|shop|garage|motors?|center|centre|mechanic|llc|inc/g;
+/** Their website's host ("amesautomotivestc.com") and its distinctive part ("amesautomotivestc"), "" when too generic. */
+export function siteIdentity(c: Collection): { host: string; stem: string } {
+  const raw = c.fields.domain.value || c.fields.existingWebsite.value || "";
+  const host = (domainOf(websiteUrl(raw) || raw) || "").replace(/^www\./, "").toLowerCase();
+  const stem = squash(host.split(".")[0] || "");
+  return { host: /\./.test(host) ? host : "", stem: stem.length >= 6 && stem.replace(GENERIC_WORDS, "").length >= 3 ? stem : "" };
+}
+/** Jira "Social Links" written as words ("facebook ames Automotive STC and same if instagram") → the platforms + the name they use. */
+export function jiraSocialHint(text: string): { platforms: string[]; name: string } {
+  const t = (text || "").replace(/https?:\/\/\S+|\S+\.(com|net|org)\S*/gi, " ");
+  const P: [string, RegExp][] = [["Facebook", /\b(facebook|fb)\b/i], ["Instagram", /\b(instagram|insta|ig)\b/i], ["Yelp", /\byelp\b/i], ["YouTube", /\byou ?tube\b/i], ["TikTok", /\btik ?tok\b/i], ["LinkedIn", /\blinked ?in\b/i], ["X", /\b(twitter|x\.com)\b/i]];
+  const platforms = P.filter(([, re]) => re.test(t)).map(([n]) => n);
+  const name = t.replace(/\b(facebook|fb|instagram|insta|ig|yelp|you ?tube|tik ?tok|linked ?in|twitter|google|gbp|and|same|if|as|for|on|is|it|its|my|our|the|page|pages|account|accounts|profile|both|also|under|handle|name|search|we|are|at|@|n\/a|none|no)\b/gi, " ")
+    .replace(/[^A-Za-z0-9&' -]/g, " ").replace(/\s+/g, " ").trim();
+  return { platforms, name: name.length >= 4 && name.split(" ").length <= 8 ? name : "" };
+}
+/** Proof a profile is theirs that doesn't depend on the name: its handle is their website's name, or the listing shows their domain. */
+export function identityProof(r: { url: string; title?: string; snippet?: string }, id: { host: string; stem: string }): string[] {
+  const out: string[] = [];
+  const p = profileOf(r.url);
+  const seg = p ? p.key.split(":")[1].split("/").pop() || "" : "";
+  const handle = squash(seg);
+  // Yelp/Google addresses are made from the name + city, so only real handles (Facebook, Instagram, …) count; "stc1"/"stcil" endings are fine
+  if (id.stem && handle && p!.platform !== "Yelp" && (handle === id.stem || (handle.startsWith(id.stem) && handle.length - id.stem.length <= 4)))
+    out.push(`its ${p!.platform} name “${seg}” matches their website ${id.host}`);
+  if (id.host && `${r.title || ""} ${r.snippet || ""}`.toLowerCase().includes(id.host)) out.push(`it shows their website ${id.host}`);
+  return out;
+}
+
 /** The web searches the research step runs for this project (exported for tests). */
-export function searchQueries(c: Collection): string[] {
+export function searchQueries(c: Collection, extra: { id?: { host: string; stem: string }; hintName?: string; altName?: string } = {}): string[] {
   const name = c.fields.shopName.value;
   const [city, st] = c.locations.length ? [c.locations[0].city, c.locations[0].state] : c.fields.cityState.value.split(",").map((s) => s.trim());
   const where = [city, st].filter(Boolean).join(" ");
@@ -901,6 +991,10 @@ export function searchQueries(c: Collection): string[] {
   } else {
     const socialCount = splitLinesKeep(c.fields.socials.value).filter((u) => platformOf(u)).length;
     if (socialCount < 4) queries.push(`"${name}" ${where} facebook OR instagram OR yelp OR youtube OR tiktok OR linkedin`);
+    // the name they actually use online (Jira's social hint / GBP) and their domain find pages a misspelled Jira name misses
+    const other = [extra.hintName, extra.altName].find((n) => n && nameSimilarity(n, name) < 0.99);
+    if (socialCount < 4 && other) queries.push(`"${other}" ${where} facebook OR instagram`);
+    if (socialCount < 4 && extra.id?.host) queries.push(`"${extra.id.host}" facebook OR instagram OR yelp`);
   }
   const needs = (["coupons", "warranties", "financing", "certifications"] as FieldKey[]).filter((k) => c.fields[k].status !== "ok");
   if (needs.length) queries.push(`"${name}" ${where} coupon OR special OR warranty OR "NAPA AutoCare" OR financing OR ASE`);
@@ -910,10 +1004,13 @@ export function searchQueries(c: Collection): string[] {
   return queries;
 }
 
-export async function stepSearch(c: Collection, ev: Evidence): Promise<string> {
+export async function stepSearch(c: Collection, ev: Evidence, raw: Record<string, string> = {}): Promise<string> {
   const name = c.fields.shopName.value;
   if (!name) return "Skipped — no shop name";
-  const queries = searchQueries(c);
+  const id = siteIdentity(c);
+  const hint = jiraSocialHint(raw.socials || "");
+  const gbpName = ev.gbp?.place?.title || "";
+  const queries = searchQueries(c, { id, hintName: hint.name, altName: gbpName });
 
   const cachedQs = ev.search?.queries.join("|");
   let results: WebResult[] = [], provider = "";
@@ -929,10 +1026,12 @@ export async function stepSearch(c: Collection, ev: Evidence): Promise<string> {
     ev.search = { queries, provider, results: results.slice(0, 40), at: now() };
   }
 
-  const nameTok = norm(name).split(" ").filter((t) => t.length > 2);
+  // any of the names they go by (Jira, GBP, Jira's social-links text), or their domain in the handle
+  const nameToks = [name, gbpName, hint.name].filter(Boolean).map((n) => norm(n).split(" ").filter((t) => t.length > 2)).filter((t) => t.length);
   const relevant = (r: WebResult) => {
-    const hay = norm(`${r.title} ${r.snippet} ${decodeURIComponent(r.url)}`);
-    return nameTok.length ? nameTok.filter((t) => hay.includes(t)).length / nameTok.length >= 0.6 : false;
+    let u = r.url; try { u = decodeURIComponent(r.url); } catch { /* keep */ }
+    const hay = norm(`${r.title} ${r.snippet} ${u}`);
+    return nameToks.some((toks) => toks.filter((t) => hay.includes(t)).length / toks.length >= 0.6) || identityProof(r, id).length > 0;
   };
   const candidates = results.filter((r) => platformOf(r.url) && profileOf(r.url) && relevant(r) && !GENERIC_SOCIAL.test(new URL(r.url).pathname));
   // Only add a profile when the listing shows this shop's phone, street address, ZIP or city + state — a similar name isn't enough
@@ -940,17 +1039,25 @@ export async function stepSearch(c: Collection, ev: Evidence): Promise<string> {
   const unsure: { r: WebResult; cityOnly: boolean }[] = [];
   for (const r of candidates) {
     const v = verifyListing(c, r);
+    v.strong.push(...identityProof(r, id));
     if (v.strong.length) {
       accepted.push(r); locHint[r.url] = v.loc;
       reasons[r.url] = `${r.ai ? "Groq AI search" : "web search"} result shows ${v.strong.join(", ")}${r.ai ? " — open it to double-check" : ""}`;
     } else if (!unsure.some((x) => profileOf(x.r.url)!.key === profileOf(r.url)!.key)) unsure.push({ r, cityOnly: v.cityOnly });
   }
-  // Second chance: open the page itself (or let Groq open it) and look for the address / phone
-  const confirmed = await confirmListings(c, unsure.slice(0, 5).map((x) => x.r));
+  // Free guesses: shops very often use their domain name as their Facebook / Instagram handle. These still need
+  // the page itself to show their phone, address or website before they're added.
+  const have = new Set([...accepted.map((r) => r.url), ...splitLinesKeep(c.fields.socials.value)].map((u) => profileOf(u)?.platform).filter(Boolean));
+  const keys = new Set(unsure.map((x) => profileOf(x.r.url)!.key));
+  if (id.stem) for (const [pl, url] of [["Instagram", `https://www.instagram.com/${id.stem}/`], ["Facebook", `https://www.facebook.com/${id.stem}`]] as const)
+    if (!have.has(pl) && !keys.has(profileOf(url)!.key)) unsure.unshift({ r: { title: "", snippet: "", url, guessed: true } as WebResult & { guessed?: boolean }, cityOnly: false });
+  // Second chance: open the page itself (or let Groq open it) and look for the address / phone / their website
+  const confirmed = await confirmListings(c, unsure.slice(0, 7).map((x) => x.r), id.host);
   for (const x of unsure) {
     const clean = profileOf(x.r.url)!.clean;
     const ok = confirmed[x.r.url];
-    if (ok) { accepted.push(x.r); locHint[x.r.url] = ok.loc; reasons[x.r.url] = ok.reason; }
+    if (ok) { accepted.push(x.r); locHint[x.r.url] = ok.loc; reasons[x.r.url] = (x.r as { guessed?: boolean }).guessed ? `${ok.reason} (found by trying their domain name as the handle)` : ok.reason; }
+    else if ((x.r as { guessed?: boolean }).guessed) continue; // a guess that couldn't be confirmed isn't worth listing
     else rejected.push(`${clean} (${x.cityOnly ? "only the city matched — could be another state" : "only the name is similar — no matching address, phone or city"})`);
   }
   ev.socialFinds = [
@@ -1291,6 +1398,8 @@ function evidenceBlock(ev: Evidence, kinds: RegExp, maxChars: number, withWarran
   const parts: string[] = [];
   const w = (ev.website?.signals as { warranty?: string[] } | undefined)?.warranty || [];
   if (withWarranty && w.length) parts.push(`WARRANTY SENTENCES FOUND ON THEIR WEBSITE:\n${w.map((x) => `- ${x}`).join("\n")}`);
+  const fin = (ev.website?.signals as { financing?: string[] } | undefined)?.financing || [];
+  if (withWarranty && fin.length) parts.push(`FINANCING SENTENCES FOUND ON THEIR WEBSITE (any page):\n${fin.map((x) => `- ${x}`).join("\n")}`);
   const progs = (ev.programs || []).filter((p) => p.warranty.length || p.certifications.length);
   if (withWarranty && progs.length) parts.push(`PROGRAM PROFILES (official NAPA AutoCare / TechNet listing for this shop):\n${progs.map((p) => `- [${p.url}] ${p.label}: warranty ${p.warranty.join("; ") || "(not shown)"}; certifications ${p.certifications.join("; ") || "(not shown)"}`).join("\n")}`);
   for (const p of ev.website?.pages || []) if (kinds.test(p.title) || p === ev.website!.pages[0]) parts.push(`[${p.url}] ${p.title}\n${p.text.slice(0, 1800)}`);
@@ -1367,7 +1476,7 @@ ${evidenceBlock(ev, /services|amenities|about/i, 7000)}` });
 `TASK B. Return {"coupons":{"value":"","note":""},"warranties":{"value":"","note":""},"financing":{"value":"","note":""},"certifications":{"value":[],"note":""},"about":{"value":"","note":""},"flags":[""]}
 - coupons: active coupons/specials with amount & conditions.
 - warranties: e.g. "36 Months / 36,000 Miles" (add "Nationwide" / "Parts & Labor" if stated). Check the WARRANTY SENTENCES, the PROGRAM PROFILES and every page (blog posts too). If they're a NAPA AutoCare Center, TechNet or PAC member, use that program's warranty only if the EVIDENCE shows it for this shop (the PROGRAM PROFILES list counts). Cite the page URL in note.
-- financing: providers/terms only if the site states them (e.g. Synchrony Car Care, Snap, Affirm).
+- financing: providers/terms only if the site states them (e.g. Synchrony Car Care, Snap, Affirm). Check the FINANCING SENTENCES first — they come from every page of their site.
 - certifications: affiliations shown in EVIDENCE (ASE, NAPA AutoCare, TechNet, AAA, Carfax, BBB, Bosch, etc.), including badges on the PROGRAM PROFILES (e.g. ASE Certified Technicians). Include JIRA ones.
 - about: 1–3 sentences only if JIRA About Us is empty. Mention how long they've been in business when YEARS IN BUSINESS is given.
 - flags: short warnings (e.g. "Website is an older brand", "Looks fully mobile", "Yelp under 4★").
@@ -1389,6 +1498,15 @@ ${evidenceBlock(ev, /coupons|warranty|financing|about|faq/i, 9000, true)}` });
     else if (r.note) patch(c, k, { note: r.note, source: "ai" });
   }
   if (B.flags?.length) patch(c, "specialNotes", { note: B.flags.filter(Boolean).map((f) => `⚠ ${f}`).join("\n"), source: "ai", status: "review" });
+  const fSent = (ev.website?.signals as { financing?: string[] } | undefined)?.financing || [];
+  if (fSent.length) {
+    // never "no financing found" when their own site states it
+    c.fields.financing.note = c.fields.financing.note.split("\n").filter((l) => !/no financing (information )?(found|listed|mentioned|on)/i.test(l)).join("\n");
+    if (!c.fields.financing.value.trim() && !c.fields.financing.manual) {
+      const providers = financeProviders(fSent);
+      patch(c, "financing", { value: providers.length ? providers.join("\n") : undefined, note: `Their website states: ${fSent.slice(0, 2).join(" · ")}${providers.length ? "" : " — copy the terms into the value."}`, source: "website", status: "review" });
+    }
+  }
   const wSent = (ev.website?.signals as { warranty?: string[] } | undefined)?.warranty || [];
   if (!c.fields.warranties.value.trim() && wSent.length) {
     // never leave it empty when their own site states one — drop the AI's "nothing found" note

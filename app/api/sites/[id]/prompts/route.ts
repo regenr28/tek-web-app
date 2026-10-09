@@ -5,7 +5,7 @@ import { parseBody, rateLimit } from "@/lib/security";
 import { loadProject } from "@/lib/projects";
 import { aiAvailable } from "@/lib/ai";
 import {
-  getPromptState, savePromptState, isOnePager, metaPagesFor, defaultServices, defaultOldUrls, promptVars,
+  getPromptState, savePromptState, isOnePager, serviceAreasOf, splitAreas, metaPagesFor, defaultServices, defaultOldUrls, promptVars,
   genLocation, genFaq, genMeta, genServicePage, genRedirects, scanDestination, metaCsv, metaText, servicesCsv, serviceText, redirectCsvParts,
   type PromptState,
 } from "@/lib/prompts";
@@ -24,6 +24,7 @@ async function view(siteId: number, st?: PromptState) {
     metaPagesDefault: metaPagesFor(p.collection, p.row),
     oldUrlsDefault: defaultOldUrls(p.evidence),
     destUrlDefault: p.row.preview_url || "",
+    serviceAreas: serviceAreasOf(s, p.evidence),
     domain: p.collection.fields.domain.value,
     location: s.location || null,
     faq: s.faq || null,
@@ -70,6 +71,8 @@ export const POST = handle(async (req: Request, ctx: Ctx) => {
 
 const Edit = z.object({
   services: z.array(z.string().trim().min(1).max(120)).max(30).nullable().optional(),
+  /** cities the shop covers, as pasted (one per line or "Elburn, IL · Batavia, IL"); null = back to what research found */
+  serviceAreas: z.string().max(4000).nullable().optional(),
   locationText: z.string().max(20000).optional(),
   faqText: z.string().max(20000).optional(),
   metaRows: z.array(z.object({ page: z.string().max(80), title: z.string().max(300), description: z.string().max(600) }).strict()).max(40).optional(),
@@ -88,6 +91,7 @@ export const PUT = handle(async (req: Request, ctx: Ctx) => {
   const id = await idOf(ctx);
   const b = await parseBody(req, Edit);
   const st = await getPromptState(id);
+  if (b.serviceAreas !== undefined) { const list = b.serviceAreas === null ? [] : splitAreas(b.serviceAreas); if (list.length) st.serviceAreas = list; else delete st.serviceAreas; }
   if (b.services !== undefined) { if (b.services === null) delete st.services; else st.services = [...new Set<string>(b.services)]; }
   if (b.locationText !== undefined && st.location) st.location.text = b.locationText;
   if (b.faqText !== undefined && st.faq) st.faq.text = b.faqText;

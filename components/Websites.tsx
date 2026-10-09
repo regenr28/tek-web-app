@@ -242,11 +242,10 @@ export default function Websites() {
   const tile = (g: Group, label: string, n: number, tone: string, hint: string, desc?: string) => {
     const active = f.group === g;
     return (
-      <button key={g || "all"} className="stat" title={hint}
+      <button key={g || "all"} className="stat" title={desc ? `${desc}\n\n${hint}` : hint}
         style={{ border: active ? "2px solid var(--accent)" : "2px solid transparent", textAlign: "left", cursor: "pointer", minWidth: 170 }}
         onClick={() => setF((x) => ({ ...x, group: x.group === g ? "" : g, problem: "", warning: "", launch: "" }))}>
         <b style={{ color: tone === "error" ? "var(--error)" : tone === "warning" ? "var(--warning)" : tone === "ok" ? "var(--ok)" : undefined }}>{n.toLocaleString()}</b><span>{label}</span>
-        {desc && <span className="muted" style={{ fontSize: 11, maxWidth: 210, lineHeight: 1.35, marginTop: 2 }}>{desc}</span>}
       </button>
     );
   };
@@ -314,7 +313,6 @@ export default function Websites() {
             style={{ textAlign: "left", cursor: "pointer", minWidth: 190, border: f.group === "uptime" ? "2px solid var(--accent)" : "2px solid transparent" }}>
             <b style={{ color: counts.avgUptime >= 99 ? "var(--ok)" : "var(--warning)" }}>{counts.avgUptime}%</b>
             <span>Uptime · active sites (30 days)</span>
-            <span className="muted" style={{ fontSize: 11 }}>{counts.up.counted.toLocaleString()} sites · what&apos;s behind it ›</span>
           </button>
         )}
       </div>
@@ -356,6 +354,8 @@ export default function Websites() {
           {UNHEALTHY.filter((k) => counts.h[k]).map((k) => <button key={k} className={`sm ${f.problem === k ? "primary" : "ghost"}`} onClick={() => setF({ ...f, problem: k })}>{L[k]} {counts.h[k]}</button>)}
         </div>
       )}
+      {!f.group && <div className="muted small">Click a number to see what&apos;s behind it. Hover a tile for a quick summary.</div>}
+      {f.group === "ok" && <div className="muted small">Their own domain loads and shows the customer&apos;s Duda site — nothing to do.</div>}
       {f.group === "unchecked" && (
         <div className="stack small" style={{ gap: 6 }}>
           <div className="muted">These sites aren&apos;t live on their own domain yet, so there&apos;s nothing to check (they don&apos;t count in uptime). They&apos;re checked automatically once they&apos;re published on a custom domain.</div>

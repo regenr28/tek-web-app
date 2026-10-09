@@ -201,6 +201,7 @@ const SCHEMA = [
 // Columns added after the first release. Each is applied once if missing.
 const COLUMNS: [table: string, column: string, ddl: string][] = [
   ["users", "mfa_enabled", "INTEGER NOT NULL DEFAULT 0"],
+  ["users", "can_history", "INTEGER NOT NULL DEFAULT 1"],
   ["users", "mfa_secret_enc", "TEXT"],
   ["users", "mfa_last_step", "INTEGER NOT NULL DEFAULT 0"],
   ["users", "recovery_codes", "TEXT"],

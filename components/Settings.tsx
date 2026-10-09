@@ -14,6 +14,7 @@ export default function Settings({ me, dudaApi }: { me: Me; dudaApi: boolean }) 
       <h1>Settings</h1>
       <div className="card">
         <div className="tabs">
+          {isSuper && <button className={tab === "general" ? "active" : ""} onClick={() => setTab("general")}>General</button>}
           {isSuper && <button className={tab === "security" ? "active" : ""} onClick={() => setTab("security")}>Security</button>}
           {isSuper && <button className={tab === "ai" ? "active" : ""} onClick={() => setTab("ai")}>AI providers</button>}
           {isAdmin && <button className={tab === "research" ? "active" : ""} onClick={() => setTab("research")}>Research</button>}
@@ -28,6 +29,7 @@ export default function Settings({ me, dudaApi }: { me: Me; dudaApi: boolean }) 
         {tab === "members" && isAdmin && <Members me={me} />}
         {tab === "duda" && <DudaInfo enabled={dudaApi} />}
         {tab === "security" && isSuper && <SecuritySettings />}
+        {tab === "general" && isSuper && <GeneralSettings />}
         {tab === "log" && isSuper && <SecurityLog />}
       </div>
     </div>
@@ -122,11 +124,38 @@ function AiSettings() {
   );
 }
 
+/** Settings → General (Super Admin): the app's name. */
+function GeneralSettings() {
+  const [d, setD] = useState<{ appName: string; defaultName: string } | null>(null);
+  const [name, setName] = useState("");
+  const [msg, setMsg] = useState(""); const [err, setErr] = useState("");
+  useEffect(() => { api<{ appName: string; defaultName: string }>("/api/settings/general").then((x) => { setD(x); setName(x.appName); }).catch((e) => setErr(e.message)); }, []);
+  const save = async (v: string) => {
+    setMsg(""); setErr("");
+    try { const x = await api<{ appName: string; defaultName: string }>("/api/settings/general", { method: "PUT", body: { appName: v } }); setD(x); setName(x.appName); setMsg("Saved — reload the page to see the new name everywhere."); }
+    catch (e) { setErr((e as Error).message); }
+  };
+  if (!d) return <p className="muted">{err || "Loading…"}</p>;
+  return (
+    <div className="stack" style={{ maxWidth: 560 }}>
+      <label className="field"><span>App name</span>
+        <input value={name} maxLength={60} onChange={(e) => setName(e.target.value)} placeholder={d.defaultName} />
+        <span className="muted small">Shown in the top bar, on the sign-in page, in the browser tab and on PDF / Excel reports.</span>
+      </label>
+      <div className="row">
+        <button className="primary sm" disabled={!name.trim() || name.trim() === d.appName} onClick={() => save(name)}>Save</button>
+        {d.appName !== d.defaultName && <button className="sm ghost" onClick={() => save("")}>Reset to “{d.defaultName}”</button>}
+      </div>
+      {msg && <div className="alert">{msg}</div>}{err && <div className="alert error">{err}</div>}
+    </div>
+  );
+}
+
 const ACCESS_OPTIONS: [string, string][] = [["websites", "All Websites only"], ["projects", "Projects only"], ["all", "Projects + All Websites"]];
 
 function Members({ me }: { me: Me }) {
   const [list, setList] = useState<(Member & { created_at: string; mfa_enabled?: number; last_login_at?: string | null })[]>([]);
-  const blank = { name: "", email: "", password: "", role: "member", access: "websites" };
+  const blank = { name: "", email: "", password: "", role: "member", access: "websites", history: true };
   const [f, setF] = useState(blank);
   const [err, setErr] = useState(""); const [ok, setOk] = useState("");
   const load = () => api<(Member & { created_at: string })[]>("/api/users").then(setList);
@@ -166,6 +195,7 @@ function Members({ me }: { me: Me }) {
             <select value={f.access} onChange={(e) => setF({ ...f, access: e.target.value })}>
               {ACCESS_OPTIONS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
             </select>
+            {f.access !== "projects" && <span className="row small" style={{ gap: 6 }}><input type="checkbox" style={{ width: "auto" }} checked={f.history} onChange={(e) => setF({ ...f, history: e.target.checked })} /> History chart (All Websites)</span>}
           </label>}
         </div>
         <div><button className="primary">Add member</button></div>
@@ -185,9 +215,14 @@ function Members({ me }: { me: Me }) {
             </td>
             <td>
               {u.role === "super_admin" ? <span className="muted small">Everything</span>
-                : <select value={u.access || "all"} disabled={!isSuper || u.id === me.id} onChange={(e) => patch(u.id, { access: e.target.value })} style={{ width: 170 }} title="Which main areas this person can open">
-                  {ACCESS_OPTIONS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
-                </select>}
+                : <div className="stack" style={{ gap: 4 }}>
+                  <select value={u.access || "all"} disabled={!isSuper || u.id === me.id} onChange={(e) => patch(u.id, { access: e.target.value })} style={{ width: 170 }} title="Which main areas this person can open">
+                    {ACCESS_OPTIONS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                  </select>
+                  {u.access !== "projects" && <label className="row small" style={{ gap: 6, flexWrap: "nowrap" }} title="The History chart on All Websites (and its PDF / Excel downloads)">
+                    <input type="checkbox" style={{ width: "auto" }} checked={u.can_history !== 0} disabled={!isSuper || u.id === me.id} onChange={(e) => patch(u.id, { history: e.target.checked })} /> History chart
+                  </label>}
+                </div>}
             </td>
             <td>{u.mfa_enabled ? <span className="badge ok">On</span> : <span className="badge warning">Off</span>}</td>
             <td className="small">{ago(u.last_login_at)}</td>

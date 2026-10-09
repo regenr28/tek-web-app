@@ -78,7 +78,7 @@ function outcomeOf(r: HistRow): Outcome {
   return "never";
 }
 
-export default function SitesHistory({ rows, filters = "" }: { rows: HistRow[]; filters?: string }) {
+export default function SitesHistory({ rows, filters = "", appName }: { rows: HistRow[]; filters?: string; appName?: string }) {
   const [unit, setUnit] = useState<Unit>("month");
   const [range, setRange] = useState<number | "custom">(12);
   const today = iso(new Date());
@@ -174,7 +174,7 @@ export default function SitesHistory({ rows, filters = "" }: { rows: HistRow[]; 
       now: OUTCOMES.find((o) => o.key === outcomeOf(x.r))!.label, inCreated: x.inC, inPublished: x.inP, inUnpublished: x.inU,
     }));
     return {
-      title: "Website history", subtitle: `${unitWord} · ${data.rangeText}`, filters, generated: new Date(),
+      title: "Website history", subtitle: `${unitWord} · ${data.rangeText}`, filters, generated: new Date(), appName,
       unitLabel: unit === "week" ? "Week" : unit === "month" ? "Month" : "Year",
       series: SERIES.map((s, i) => ({ label: seriesLabel(s), short: s.short, color: HEX[i] })),
       buckets: data.buckets.map((b) => ({ label: label(b.start, unit, true), start: b.start, values: SERIES.map((s) => b[s.key]) })),

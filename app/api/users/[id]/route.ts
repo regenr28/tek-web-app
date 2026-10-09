@@ -12,6 +12,7 @@ const Body = z.object({
   resetMfa: z.literal(true).optional(),
   unlock: z.literal(true).optional(),
   access: z.enum(ACCESS_VALUES).optional(),
+  history: z.boolean().optional(),
 });
 
 export const PATCH = handle(async (req: Request, ctx: Ctx) => {
@@ -35,6 +36,12 @@ export const PATCH = handle(async (req: Request, ctx: Ctx) => {
     // Takes effect on their next request (access is read from the database each time).
     await run("UPDATE users SET access = ? WHERE id = ?", [b.access, id]);
     await logEvent("user.access_changed", me.id, { target: id, access: b.access });
+  }
+  if (typeof b.history === "boolean") {
+    if (!hasRole(me, "super_admin")) throw new HttpError(403, "Only a Super Admin can change what a member can see");
+    if (id === me.id) throw new HttpError(400, "You can't change your own access");
+    await run("UPDATE users SET can_history = ? WHERE id = ?", [b.history ? 1 : 0, id]);
+    await logEvent("user.access_changed", me.id, { target: id, history: b.history });
   }
   if (typeof b.active === "boolean") {
     await run("UPDATE users SET active = ? WHERE id = ?", [b.active ? 1 : 0, id]);

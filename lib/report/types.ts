@@ -11,6 +11,8 @@ export type ReportData = {
   /** active page filters, "" = none */
   filters: string;
   generated: Date;
+  /** the app's display name (Settings → General) */
+  appName?: string;
   unitLabel: string;
   series: ReportSeries[];
   buckets: { label: string; start: Date; values: number[] }[];

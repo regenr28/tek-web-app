@@ -80,7 +80,7 @@ function MfaCard({ enabled, required, onDone }: { enabled: boolean; required: bo
     catch (e) { setErr((e as Error).message); }
   };
   const download = () => {
-    const blob = new Blob([`Duda Preview Audit — recovery codes\nEach code works once.\n\n${codes!.join("\n")}\n`], { type: "text/plain" });
+    const blob = new Blob([`${document.title || "Tek Website Monitoring"} — recovery codes\nEach code works once.\n\n${codes!.join("\n")}\n`], { type: "text/plain" });
     const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "duda-audit-recovery-codes.txt"; a.click();
   };
 

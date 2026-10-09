@@ -1,11 +1,14 @@
 import "./globals.css";
 import type { Metadata } from "next";
+import { getAppName } from "@/lib/branding";
 import { headers } from "next/headers";
 import { CREATOR } from "@/lib/credit";
 
-export const metadata: Metadata = {
-  title: "Duda Preview Audit",
-  description: "QA audits for Duda sites from preview links",
+export async function generateMetadata(): Promise<Metadata> {
+  return { ...baseMetadata, title: await getAppName() };
+}
+const baseMetadata: Metadata = {
+  description: "Website monitoring and QA for Duda sites",
   authors: [{ name: CREATOR }],
   creator: CREATOR,
   robots: { index: false, follow: false },

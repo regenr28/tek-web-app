@@ -56,7 +56,7 @@ export function verifyTotp(secretB32: string, code: string, lastStep: number, no
   return 0;
 }
 
-export const otpauthUrl = (secret: string, account: string, issuer = "Duda Preview Audit") =>
+export const otpauthUrl = (secret: string, account: string, issuer = "Tek Website Monitoring") =>
   `otpauth://totp/${encodeURIComponent(issuer)}:${encodeURIComponent(account)}?secret=${secret}&issuer=${encodeURIComponent(issuer)}&algorithm=SHA1&digits=6&period=30`;
 
 export function newRecoveryCodes(n = 10) {

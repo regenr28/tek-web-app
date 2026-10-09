@@ -16,6 +16,7 @@ type Data = {
   rows: Row[]; canManage: boolean; run: Run | null; settings: { schedule: string; notLiveDays: number; tempDomainDays: number; gbpPerDay: number };
   import: { at: string; total: number; added: number; skipped: number; refreshed: number; missing: number } | null;
   healthLabels: Record<string, string>; healthOrder: string[]; flagLabels: Record<string, string>;
+  canHistory: boolean; appName: string;
 };
 
 const TONE: Record<string, string> = { ok: "ok", redirect: "warning", moved: "warning", ssl: "warning", taken: "error", parked: "error", not_found: "error", error: "error", dns: "error", down: "error", unchecked: "", skipped: "", temp: "" };
@@ -306,7 +307,7 @@ export default function Websites() {
           topReasons(counts.h, NOT_CHECKED.map(([k]) => k)) || "Sites that aren't live yet, so there's nothing to check")}
         {tile("launch", "Launch tracker", counts.launch, counts.launch ? "warning" : "", `Paid for but maybe not really live: not published ${d.settings.notLiveDays}+ days after creation, or published but only on the temporary tekmetric.site address for ${d.settings.tempDomainDays}+ days, or Duda billing failed`,
           counts.launch ? `Paid for, maybe not live: ${topReasons(counts.lf, Object.keys(LAUNCH))}` : "Paid-for sites that never really went live — none right now")}
-        <button className="stat" onClick={flipHistory} title="Sites created, first published and unpublished for good — per week, month or year" style={{ textAlign: "left", cursor: "pointer", minWidth: 150, border: showHistory ? "2px solid var(--accent)" : "2px solid transparent" }}><b>📈</b><span>{showHistory ? "Hide history" : "History chart"}</span></button>
+        {d.canHistory && <button className="stat" onClick={flipHistory} title="Sites created, first published and unpublished for good — per week, month or year" style={{ textAlign: "left", cursor: "pointer", minWidth: 150, border: showHistory ? "2px solid var(--accent)" : "2px solid transparent" }}><b>📈</b><span>{showHistory ? "Hide history" : "History chart"}</span></button>}
         {counts.avgUptime !== null && (
           <button className="stat" onClick={() => setF((x) => ({ ...x, group: x.group === "uptime" ? "" : "uptime", uptime: "below", problem: "", warning: "", launch: "" }))}
             title="Average uptime of active sites over the last 30 days. Domains that were lost or moved away aren't counted. Click to see what's behind the number."
@@ -335,7 +336,7 @@ export default function Websites() {
         </div>
       )}
       {f.group === "uptime" && <UptimeExplainer c={counts.up} h={counts.h} avg={counts.avgUptime} L={L} pick={(u) => setF({ ...f, uptime: u })} active={f.uptime || "below"} />}
-      {showHistory && <SitesHistory rows={base} filters={describeFilters(f)} />}
+      {showHistory && d.canHistory && <SitesHistory rows={base} filters={describeFilters(f)} appName={d.appName} />}
       {f.group === "launch" && (
         <div className="muted small">Sites the shop is paying for that may not really be live: not published {d.settings.notLiveDays}+ days after they were created, published but still only on the temporary tekmetric.site address after {d.settings.tempDomainDays}+ days (their own domain was never connected), or Duda billing failed.</div>
       )}
@@ -406,8 +407,10 @@ export default function Websites() {
           <button className="sm ghost" onClick={() => setF(EMPTY)}>Clear filters</button>
         </div>
         {f.domainType !== "temp_published" && temp.n > 0 && (
-          <div className="small"><button className="sm ghost" onClick={() => setF({ ...f, domainType: "temp_published", status: "", tempAge: "", sort: "" })}>
-            💸 {temp.n.toLocaleString()} published site{temp.n > 1 ? "s are" : " is"} still only on tekmetric.site{temp.oldest ? ` — the oldest for ${ageText(temp.oldest.td)}` : ""} · show them</button></div>
+          <div className="alert warning row between small" style={{ flexWrap: "wrap", gap: 8 }}>
+            <span>💸 <b>{temp.n.toLocaleString()} published site{temp.n > 1 ? "s are" : " is"} still only on tekmetric.site</b>{temp.oldest ? ` — the oldest for ${ageText(temp.oldest.td)}` : ""}. They&apos;re billed, but their own domain was never connected.</span>
+            <button className="sm primary" onClick={() => setF({ ...f, domainType: "temp_published", status: "", tempAge: "", sort: "" })}>Show these sites →</button>
+          </div>
         )}
         {moreOpen && (
           <div className="row small" style={{ flexWrap: "wrap", gap: 12 }}>

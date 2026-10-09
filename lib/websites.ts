@@ -3,7 +3,7 @@ import { all, one, run, batch } from "./db";
 import { parseCsv } from "./parse";
 import { HttpError } from "./security";
 import { sha256, randomToken } from "./secrets";
-import { checkWebsite, HEALTH_LABEL, FLAG_LABEL, stagingSql, type Health } from "./health";
+import { checkWebsite, HEALTH_LABEL, FLAG_LABEL, stagingSql, isStaging, type Health } from "./health";
 import { addPoint, trackIncidents, eventsFor, uptimeStats, launchStatus, DEFAULT_LAUNCH, type UptimePoint, type Incident } from "./monitor";
 import { notifyRunFinished } from "./alerts";
 
@@ -263,9 +263,14 @@ const esc = (v: unknown) => {
   if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
   return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 };
+const tempDaysOf = (r: WebsiteRow) => {
+  if (r.duda_status !== "PUBLISHED" || !isStaging(r.domain.toLowerCase())) return "";
+  const at = r.first_publish || r.created_at;
+  return at ? String(Math.max(0, Math.floor((Date.now() - Date.parse(at)) / 86_400_000))) : "";
+};
 export function toCsv(rows: WebsiteRow[], label: (h: string) => string, flagLabel: (f: string) => string) {
-  const head = ["Site Name", "Site Alias", "Domain", "Duda Status", "Labels", "Creation date", "First publish date", "Last publish date", "Domain Health", "Health Detail", "Warnings", "Last Checked (UTC)", "Health Changed (UTC)", "Previous Health", "Domain Expires", "SSL Expires", "In Latest Import"];
+  const head = ["Site Name", "Site Alias", "Domain", "Duda Status", "Labels", "Creation date", "First publish date", "Last publish date", "Domain Health", "Health Detail", "Warnings", "Last Checked (UTC)", "Health Changed (UTC)", "Previous Health", "Domain Expires", "SSL Expires", "In Latest Import", "On tekmetric.site only (days since first publish)"];
   const lines = rows.map((r) => [r.site_name, r.alias, r.domain, r.duda_status, r.labels, r.created_at, r.first_publish, r.last_publish, label(r.health), r.health_detail,
-    (JSON.parse(r.health_flags || "[]") as string[]).map(flagLabel).join("; "), r.checked_at, r.health_changed_at, r.prev_health ? label(r.prev_health) : "", r.domain_expires?.slice(0, 10), r.ssl_expires?.slice(0, 10), r.missing ? "No" : "Yes"].map(esc).join(","));
+    (JSON.parse(r.health_flags || "[]") as string[]).map(flagLabel).join("; "), r.checked_at, r.health_changed_at, r.prev_health ? label(r.prev_health) : "", r.domain_expires?.slice(0, 10), r.ssl_expires?.slice(0, 10), r.missing ? "No" : "Yes", tempDaysOf(r)].map(esc).join(","));
   return "﻿" + [head.join(","), ...lines].join("\r\n");
 }

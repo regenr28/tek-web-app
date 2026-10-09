@@ -9,9 +9,10 @@ type ServicePage = Gen & { sections: { label: string; title: string; content: st
 type RedirectRow = { from: string; to: string; type: string; why?: string };
 type View = {
   onePager: boolean; template: string | null; projectType: string | null; vars: Record<string, string>; services: string[];
-  metaPagesDefault: string[]; oldUrlsDefault: string; destUrlDefault: string; domain: string;
+  metaPagesDefault: string[]; oldUrlsDefault: string; destUrlDefault: string; domain: string; serviceAreas: { list: string[]; from: "you" | "website" | "" };
   location: (Gen & { text: string; cities: string[] }) | null;
-  faq: (Gen & { variant: string; text: string }) | null;
+  faq: (Gen & { variant: string; text: string; links?: { question: string; label: string; requested: boolean }[] }) | null;
+  rules: Record<"location" | "faq" | "meta" | "services" | "redirects", string[]>;
   meta: (Gen & { pages: string[]; rows: MetaRow[]; text: string; csv: string }) | null;
   servicePages: Record<string, ServicePage>; servicesCsv: string;
   redirects: (Gen & { oldText: string; destUrl: string; destText: string; fullAnchors: boolean; rows: RedirectRow[]; csvParts: string[] }) | null;
@@ -114,6 +115,15 @@ function TextOut({ text, onSave, name }: { text: string; onSave: (t: string) => 
     </div>
   );
 }
+/** The general rules (Settings → Prompts) that go out with this prompt. */
+function Rules({ list }: { list: string[] }) {
+  return (
+    <details className="small"><summary className="muted">{list.length ? `General rules sent with this prompt (${list.length})` : "No general rules yet"}</summary>
+      {list.length ? <ul style={{ margin: "4px 0", paddingLeft: 18 }}>{list.map((x, i) => <li key={i}>{x}</li>)}</ul> : null}
+      <div className="muted">Admins edit them in <b>Settings → Prompts</b> (per prompt, or for every prompt). They go out in the same request as the prompt, so the first answer already follows them.</div>
+    </details>
+  );
+}
 function Vars({ v, keys }: { v: View; keys: string[] }) {
   return (
     <details className="small"><summary className="muted">Shop details used</summary>
@@ -125,10 +135,23 @@ function Vars({ v, keys }: { v: View; keys: string[] }) {
 /* ---------- Location ---------- */
 
 function LocationPanel({ v, busy, gen, edit }: P) {
+  const [areas, setAreas] = useState(v.serviceAreas.list.join("\n"));
+  useEffect(() => setAreas(v.serviceAreas.list.join("\n")), [v.serviceAreas]);
+  const changed = areas.trim() !== v.serviceAreas.list.join("\n").trim();
   return (
     <div className="card stack" style={{ boxShadow: "none" }}>
-      <Head title="Our location" help="Intro for the location section + 24 nearby cities with their counties." label="Write location content" busy={busy === "location"} done={v.location} gen={() => gen("location", { kind: "location" })} />
+      <Head title="Our location" help="Intro for the location section + 24 nearby cities with their counties. The shop's own service area goes first." label="Write location content" busy={busy === "location"} done={v.location} gen={() => gen("location", { kind: "location" })} />
+      <label className="field"><span>Service area — cities they cover ({v.serviceAreas.list.length}{v.serviceAreas.from === "website" ? ", read from their website" : v.serviceAreas.from === "you" ? ", entered by you" : ""})</span>
+        <textarea rows={Math.min(8, Math.max(3, areas.split("\n").length + 1))} value={areas} onChange={(e) => setAreas(e.target.value)}
+          placeholder={"Paste the list from their Facebook page (About → service area) or website, e.g.\nElburn, IL · North Aurora, IL · Batavia, IL · Geneva, IL"} />
+        <span className="row small" style={{ gap: 6 }}>
+          <button className="sm" disabled={!changed} onClick={() => edit({ serviceAreas: areas })}>Save service area</button>
+          {v.serviceAreas.from === "you" && <button className="sm ghost" onClick={() => edit({ serviceAreas: null })}>Use what research found</button>}
+          <span className="muted">These cities are listed first, in this order; the rest of the 24 are the nearest other towns.</span>
+        </span>
+      </label>
       <Vars v={v} keys={["Shop_Name", "City_State", "Vehicles_Serviced", "Certifications", "Warranty"]} />
+      <Rules list={v.rules.location} />
       {v.location && <>
         <Issues list={v.location.issues} />
         <TextOut name="location" text={v.location.text} onSave={(t) => edit({ locationText: t })} />
@@ -144,10 +167,13 @@ function FaqPanel({ v, busy, gen, edit }: P) {
   return (
     <div className="card stack" style={{ boxShadow: "none" }}>
       <Head title="FAQ" label="Write FAQ"
-        help={v.onePager ? <>One-page site ({v.template || "Basic"}) — uses the <b>section</b> version (“check our coupons section”).</> : <>Multi-page site — uses the <b>page</b> version (“check our coupons page”).</>}
+        help={v.onePager ? <>One-page site ({v.template || "Basic"}) — uses the <b>section</b> version. Answers only point to requested sections.</> : <>Multi-page site — uses the <b>page</b> version. Answers only point to requested pages.</>}
         busy={busy === "faq"} done={v.faq} gen={() => gen("faq", { kind: "faq" })} />
       <Vars v={v} keys={["Shop_Name", "Shop_Location", "Shop_Hours", "Requested_Pages"]} />
+      <Rules list={v.rules.faq} />
       {v.faq && <>
+        {!!v.faq.links?.length && <div className="muted small">{v.onePager ? "Sections" : "Pages"} the answers may point to:{" "}
+          {v.faq.links.map((l) => <span key={l.question} className={`badge ${l.requested ? "ok" : ""}`} style={{ marginRight: 4 }} title={l.question}>{l.requested ? "✓" : "✗"} {l.label}{l.requested ? "" : " — not requested, not mentioned"}</span>)}</div>}
         <Issues list={v.faq.issues} />
         <TextOut name="faq" text={v.faq.text} onSave={(t) => edit({ faqText: t })} />
         <AskAi busy={busy === "faq"} onAsk={(t) => gen("faq", { kind: "faq", instruction: t })} />
@@ -170,6 +196,7 @@ function MetaPanel({ v, busy, gen, edit }: P) {
       <Head title="Meta titles & descriptions" label="Write meta" busy={busy === "meta"} done={v.meta}
         help={v.onePager ? "One-page site: Home, Image Credits, Privacy Policy, Site Wide." : "Requested pages + Home, About Us, Image Credits, Privacy Policy, Site Wide."}
         gen={() => gen("meta", { kind: "meta", pages: list })} />
+      <Rules list={v.rules.meta} />
       <details className="small" open={!v.meta}><summary>Pages ({list.length})</summary>
         <textarea rows={Math.min(14, list.length + 1)} value={pages} onChange={(e) => setPages(e.target.value)} />
         <button className="sm ghost" onClick={() => setPages(v.metaPagesDefault.join("\n"))}>Reset to the default list</button>
@@ -234,6 +261,7 @@ function ServicesPanel({ v, busy, gen, edit }: P) {
         <button className="sm" disabled={list.join("\n") === v.services.join("\n")} onClick={() => edit({ services: list.length ? list : null })}>Save services</button>
       </details>
       <Vars v={v} keys={["Shop_Name", "City_State", "Certifications", "Warranty"]} />
+      <Rules list={v.rules.services} />
       <table className="t small">
         <tbody>{[...v.services, ...Object.keys(v.servicePages).filter((s) => !v.services.includes(s))].map((s) => {
           const sp = v.servicePages[s];
@@ -307,6 +335,7 @@ function RedirectsPanel({ v, busy, gen, siteId, onError }: P & { siteId: number;
           {r && <div className="muted small">Written {ago(r.at)} · {r.provider.split(":")[0]}</div>}</div>
         <button className="primary" disabled={busy === "redirects" || !olds || !dests} onClick={() => gen("redirects", body)}>{busy === "redirects" ? "Matching…" : r ? "Write again" : "Write redirects"}</button>
       </div>
+      <Rules list={v.rules.redirects} />
       <div className="grid2">
         <label className="field"><span>Old page URLs ({olds})</span>
           <textarea rows={12} value={oldText} onChange={(e) => setOld(e.target.value)} placeholder={"/about-us\n/services/brakes\n…"} />

@@ -5,8 +5,8 @@ import { parseBody, rateLimit } from "@/lib/security";
 import { loadProject } from "@/lib/projects";
 import { aiAvailable } from "@/lib/ai";
 import {
-  getPromptState, savePromptState, isOnePager, metaPagesFor, defaultServices, defaultOldUrls, promptVars,
-  genLocation, genFaq, genMeta, genServicePage, genRedirects, scanDestination, metaCsv, metaText, servicesCsv, serviceText, redirectCsvParts,
+  getPromptState, savePromptState, isOnePager, serviceAreasOf, splitAreas, metaPagesFor, defaultServices, defaultOldUrls, promptVars,
+  getPromptRules, rulesFor, genLocation, genFaq, genMeta, genServicePage, genRedirects, scanDestination, metaCsv, metaText, servicesCsv, serviceText, redirectCsvParts,
   type PromptState,
 } from "@/lib/prompts";
 
@@ -17,13 +17,17 @@ async function view(siteId: number, st?: PromptState) {
   const s = st || (await getPromptState(siteId));
   const services = s.services ?? defaultServices(p.collection);
   const onePager = isOnePager(p.row);
+  const areas = serviceAreasOf(s, p.evidence);
+  const rules = await getPromptRules();
   return {
     onePager, template: p.row.template, projectType: p.row.project_type,
-    vars: promptVars(p.collection, p.row, s.services),
+    vars: promptVars(p.collection, p.row, s.services, areas.list),
+    rules: Object.fromEntries((["location", "faq", "meta", "services", "redirects"] as const).map((k) => [k, rulesFor(rules, k)])) as Record<"location" | "faq" | "meta" | "services" | "redirects", string[]>,
     services,
     metaPagesDefault: metaPagesFor(p.collection, p.row),
     oldUrlsDefault: defaultOldUrls(p.evidence),
     destUrlDefault: p.row.preview_url || "",
+    serviceAreas: areas,
     domain: p.collection.fields.domain.value,
     location: s.location || null,
     faq: s.faq || null,
@@ -70,6 +74,8 @@ export const POST = handle(async (req: Request, ctx: Ctx) => {
 
 const Edit = z.object({
   services: z.array(z.string().trim().min(1).max(120)).max(30).nullable().optional(),
+  /** cities the shop covers, as pasted (one per line or "Elburn, IL · Batavia, IL"); null = back to what research found */
+  serviceAreas: z.string().max(4000).nullable().optional(),
   locationText: z.string().max(20000).optional(),
   faqText: z.string().max(20000).optional(),
   metaRows: z.array(z.object({ page: z.string().max(80), title: z.string().max(300), description: z.string().max(600) }).strict()).max(40).optional(),
@@ -88,6 +94,7 @@ export const PUT = handle(async (req: Request, ctx: Ctx) => {
   const id = await idOf(ctx);
   const b = await parseBody(req, Edit);
   const st = await getPromptState(id);
+  if (b.serviceAreas !== undefined) { const list = b.serviceAreas === null ? [] : splitAreas(b.serviceAreas); if (list.length) st.serviceAreas = list; else delete st.serviceAreas; }
   if (b.services !== undefined) { if (b.services === null) delete st.services; else st.services = [...new Set<string>(b.services)]; }
   if (b.locationText !== undefined && st.location) st.location.text = b.locationText;
   if (b.faqText !== undefined && st.faq) st.faq.text = b.faqText;

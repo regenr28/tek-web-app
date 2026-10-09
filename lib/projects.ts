@@ -37,6 +37,8 @@ export function jiraRaw(f: JiraFields) {
     coupons: pick(f, /^Coupons$/i), about: pick(f, /^About Us$/i), website: pick(f, /^Current Website$/i), domain: pick(f, /what is that domain/i),
     certifications: [pick(f, /select any relevant shop affiliations/i), pick(f, /list any other affiliations/i)].filter(Boolean).join(", "),
     vehiclesNotServiced: pick(f, /vehicles not serviced/i), instructions: pick(f, /^Instructions$/i),
+    /** the Social Links answer as typed (often names, not URLs: "facebook ames Automotive STC and same if instagram") */
+    socials: pick(f, /^Social Links$/i),
   };
 }
 

@@ -41,7 +41,7 @@ export async function runStep(siteId: number, step: JobStep): Promise<{ ok: bool
   try {
     if (step === "gbp") summary = await stepGbp(c, ev);
     else if (step === "website") summary = await stepWebsite(c, ev);
-    else if (step === "search") summary = await stepSearch(c, ev);
+    else if (step === "search") summary = await stepSearch(c, ev, raw);
     else if (step === "programs") summary = await stepPrograms(c, ev);
     else if (step === "check") summary = await stepCrossCheck(c, ev, raw);
     else if (step === "ai") summary = await stepAi(c, ev, raw);

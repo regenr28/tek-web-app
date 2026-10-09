@@ -28,7 +28,7 @@ export const PROMPT_INFO: { key: PromptKey; label: string; help: string }[] = [
 export const VARIABLES: [string, string][] = [
   ["Shop_Name", "Shop name"], ["City_State", "City, State"], ["Shop_Location", "Full address(es)"], ["Shop_Hours", "Shop hours"],
   ["Vehicles_Serviced", "Vehicles serviced"], ["Certifications", "Certifications"], ["Warranty", "Warranties"], ["Services", "Service topics"],
-  ["Requested_Pages", "Requested pages/sections"], ["Website_Type", "Website type"], ["Service_Page", "The service being written (service pages)"],
+  ["Requested_Pages", "Requested pages/sections"], ["Service_Areas", "Cities the shop covers (Location tab → Service areas)"], ["Website_Type", "Website type"], ["Service_Page", "The service being written (service pages)"],
   ["Meta_Pages", "Pages for meta (meta prompt)"], ["Old_URLs", "Old page URLs (redirects)"], ["Destination_URLs", "New site pages (redirects)"],
 ];
 
@@ -244,6 +244,31 @@ export async function savePrompt(key: PromptKey, text: string) {
   if (!clean || clean === DEFAULT_PROMPTS[key]) delete saved[key]; else saved[key] = clean;
   await run("INSERT INTO settings (key, value) VALUES ('content_prompts', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [JSON.stringify(saved)]);
 }
+/* ---------------- general rules (Settings → Prompts) ---------------- */
+
+/** Rules sent together with the prompt in the same AI request, so the first answer already follows them. */
+export type RuleKey = "all" | "location" | "faq" | "meta" | "services" | "redirects";
+export const RULE_KEYS: RuleKey[] = ["all", "location", "faq", "meta", "services", "redirects"];
+export const ruleKeyOf = (k: PromptKey): RuleKey => (k === "faqPages" || k === "faqSections" ? "faq" : k);
+export async function getPromptRules(): Promise<Record<RuleKey, string>> {
+  const r = await one<{ value: string }>("SELECT value FROM settings WHERE key = 'prompt_rules'");
+  const saved = r ? (JSON.parse(r.value) as Partial<Record<RuleKey, string>>) : {};
+  return Object.fromEntries(RULE_KEYS.map((k) => [k, typeof saved[k] === "string" ? saved[k]! : ""])) as Record<RuleKey, string>;
+}
+export async function savePromptRules(key: RuleKey, text: string) {
+  const all = await getPromptRules();
+  all[key] = text.replace(/\r\n?/g, "\n").split("\n").map((l) => l.replace(/\s+$/, "")).join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  await run("INSERT INTO settings (key, value) VALUES ('prompt_rules', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [JSON.stringify(all)]);
+}
+/** The rules for one kind of content: "every prompt" rules first, then this prompt's own. */
+export function rulesFor(rules: Record<RuleKey, string>, key: RuleKey): string[] {
+  return [rules.all, key === "all" ? "" : rules[key]].flatMap((t) => (t || "").split("\n")).map((l) => l.replace(/^\s*(?:[-•*]|\d+[.)])\s*/, "").trim()).filter(Boolean);
+}
+function rulesBlock(list: string[], vars: Record<string, string>) {
+  if (!list.length) return "";
+  return `\n\nGENERAL RULES — always follow these in this answer (when they disagree with MY PROMPT, the rules win):\n${list.map((l) => `- ${fillPrompt(l, vars)}`).join("\n")}`;
+}
+
 export function normalizePromptText(text: string) {
   let t = text.replace(/\r\n?/g, "\n").trim();
   if (/^="/.test(t) || /"\s*&\s*\w+\s*&\s*"/.test(t)) {
@@ -269,8 +294,10 @@ export type RedirectRow = { from: string; to: string; type: string; why?: string
 export type PromptState = {
   /** Service topics for the homepage Services section and the service pages (default: Data Collection → Primary Services) */
   services?: string[];
+  /** Cities the shop says it covers (Facebook "service area", their website) — listed first in the Location section */
+  serviceAreas?: string[];
   location?: Gen & { text: string; cities: string[] };
-  faq?: Gen & { variant: "faqPages" | "faqSections"; items: FaqItem[]; text: string };
+  faq?: Gen & { variant: "faqPages" | "faqSections"; items: FaqItem[]; text: string; links?: FaqLink[] };
   meta?: Gen & { pages: string[]; rows: MetaRow[] };
   servicePages?: Record<string, ServicePage>;
   redirects?: Gen & { oldText: string; destUrl: string; destText: string; fullAnchors: boolean; rows: RedirectRow[] };
@@ -293,7 +320,21 @@ export function isOnePager(row: Pick<ProjectRow, "project_type" | "template">) {
 const lines = (s: string) => splitLinesKeep(s).map((x) => x.replace(/^[-•*]\s*/, ""));
 export function defaultServices(c: Collection) { return lines(c.fields.services.value).slice(0, 30); }
 
-export function promptVars(c: Collection, row: Pick<ProjectRow, "project_type" | "template">, services?: string[]): Record<string, string> {
+/** Cities the shop says it covers: what the team typed on the Location tab, else what research read on their website. */
+export function serviceAreasOf(st: PromptState, ev: { website?: { signals?: Record<string, unknown> } }): { list: string[]; from: "you" | "website" | "" } {
+  if (st.serviceAreas?.length) return { list: st.serviceAreas, from: "you" };
+  const w = (ev.website?.signals?.serviceAreas as string[] | undefined) || [];
+  return { list: w, from: w.length ? "website" : "" };
+}
+/** "Elburn, IL · North Aurora, IL · Batavia" (pasted from Facebook) → one city per item. */
+export function splitAreas(text: string): string[] {
+  const parts = text.split(/\n|\s[·•|]\s|;|(?<=,\s?[A-Z]{2})\s*,\s*|(?<=\b[A-Z]{2})\s+(?=[A-Z][a-z])/).map((x) => x.replace(/^[-•*\d.)\s]+/, "").replace(/\s+/g, " ").trim()).filter(Boolean);
+  const out: string[] = [];
+  for (const p of parts) if (p.length <= 60 && !out.some((o) => o.toLowerCase() === p.toLowerCase())) out.push(p);
+  return out.slice(0, 40);
+}
+
+export function promptVars(c: Collection, row: Pick<ProjectRow, "project_type" | "template">, services?: string[], areas?: string[]): Record<string, string> {
   const locs = c.locations;
   const each = (fn: (i: number) => string) => locs.map((L, i) => `${L.city ? `${L.city}, ${L.state}: ` : ""}${fn(i)}`).filter((x) => x.trim()).join("\n");
   return {
@@ -306,6 +347,7 @@ export function promptVars(c: Collection, row: Pick<ProjectRow, "project_type" |
     Warranty: lines(c.fields.warranties.value).join("; "),
     Services: (services?.length ? services : defaultServices(c)).join(", "),
     Requested_Pages: c.pages.join(", "),
+    Service_Areas: (areas || []).join(", "),
     Website_Type: isOnePager(row) ? "One-page site (sections, no separate pages)" : row.project_type === "mso" ? "MSO multi-page site" : "Multi-page site",
   };
 }
@@ -356,16 +398,23 @@ async function project(siteId: number) {
   if (!p.jira && !p.collection.fields.shopName.value) throw new HttpError(400, "Import the Jira export and fill the Data Collection first");
   const st = await getPromptState(siteId);
   const prompts = await getPrompts();
-  const vars = promptVars(p.collection, p.row, st.services);
-  return { p, c: p.collection, row: p.row, st, prompts, vars };
+  const areas = serviceAreasOf(st, p.evidence);
+  const vars = promptVars(p.collection, p.row, st.services, areas.list);
+  const rules = await getPromptRules();
+  const rulesText = (k: RuleKey) => rulesBlock(rulesFor(rules, k), vars);
+  return { p, c: p.collection, row: p.row, st, prompts, vars, areas, rulesText };
 }
 
 /* ---------------- Location ---------------- */
 
 export async function genLocation(siteId: number, rev?: Rev) {
-  const { c, st, prompts, vars } = await project(siteId);
+  const { c, st, prompts, vars, areas, rulesText } = await project(siteId);
   const shopCity = (c.locations[0]?.city || c.fields.cityState.value.split(",")[0] || "").trim().toLowerCase();
-  const user = `SHOP DETAILS:\n${details(c)}\n\nMY PROMPT:\n${fillPrompt(prompts.location, vars)}
+  const st2 = (c.locations[0]?.state || c.fields.cityState.value.split(",")[1] || "").trim().slice(0, 2).toUpperCase();
+  // the shop's own service area comes first (minus the shop's own city, which the intro already names)
+  const priority = areas.list.map((a) => (/,\s*[A-Z]{2}\b/.test(a) ? a : st2 ? `${a}, ${st2}` : a)).filter((a) => cityKey(a) !== cityKey(shopCity));
+  const areaBlock = priority.length ? `\n\nSERVICE AREA — the shop says it covers these cities (${areas.from === "you" ? "from its Facebook page / the team" : "from its website"}). List them FIRST, in this order, each with its county, then add the nearest other towns until there are 24:\n${priority.join("\n")}` : "";
+  const user = `SHOP DETAILS:\n${details(c)}\n\nMY PROMPT:\n${fillPrompt(prompts.location, vars)}${areaBlock}${rulesText("location")}
 
 Return ONLY JSON: {"paragraphs":["intro paragraph","second paragraph"],"cities":["City, ST (County Name County)"]}
 - paragraphs: the section text (same idea as the reference, completely new wording, about this shop).
@@ -380,8 +429,21 @@ Return ONLY JSON: {"paragraphs":["intro paragraph","second paragraph"],"cities":
       cities = cleanCities([...cities, ...(parseJson<{ cities?: string[] }>(more.text)?.cities || [])], shopCity);
     } catch { /* keep what we have */ }
   }
+  // service-area cities first, in the shop's order (added when the AI left one out — then its county needs checking)
+  let areaMissing: string[] = [];
+  if (priority.length) {
+    const first: string[] = [], missing: string[] = [];
+    for (const a of priority) {
+      const hit = cities.find((x) => cityKey(x) === cityKey(a));
+      if (hit) first.push(hit); else { first.push(a); missing.push(a); }
+    }
+    cities = [...first, ...cities.filter((x) => !first.some((f) => cityKey(f) === cityKey(x)))];
+    areaMissing = missing;
+  }
   cities = cities.slice(0, 24);
   const issues: string[] = [];
+  if (areaMissing.length) issues.push(`Add the county for: ${areaMissing.join("; ")} (service-area cities the AI didn't list)`);
+  if (priority.length) issues.unshift(`The first ${Math.min(24, priority.length)} cities are the shop's own service area (${areas.from === "you" ? "entered on this tab" : "read from their website"}).`);
   if (!paras.length) issues.push("No intro text came back");
   if (cities.length !== 24) issues.push(`${cities.length} cities (needs 24)`);
   const bad = cities.filter((x) => !/^[^,]+, [A-Z]{2} \(.+\b(County|Parish|Borough|Census Area|Municipality)\)$/.test(x));
@@ -392,11 +454,14 @@ Return ONLY JSON: {"paragraphs":["intro paragraph","second paragraph"],"cities":
   await savePromptState(siteId, st);
   return st.location;
 }
+/** "St. Charles, IL (Kane County)" → "saint charles" (for comparing city names). */
+const cityKey = (s: string) => s.split(/[,(]/)[0].toLowerCase().replace(/\bst\.?\s+/g, "saint ").replace(/\bft\.?\s+/g, "fort ").replace(/\bmt\.?\s+/g, "mount ").replace(/[^a-z ]/g, "").replace(/\s+/g, " ").trim();
+
 function cleanCities(list: unknown[], shopCity: string) {
   const out: string[] = [];
   for (const x of list) {
     const s = String(x).replace(/^[-•*\d.)\s]+/, "").replace(/\s+/g, " ").trim();
-    if (!s || s.split(",")[0].trim().toLowerCase() === shopCity) continue;
+    if (!s || cityKey(s) === cityKey(shopCity)) continue;
     if (!out.some((o) => o.split("(")[0].trim().toLowerCase() === s.split("(")[0].trim().toLowerCase())) out.push(s);
   }
   return out;
@@ -404,24 +469,84 @@ function cleanCities(list: unknown[], shopCity: string) {
 
 /* ---------------- FAQ ---------------- */
 
+/** Pages / sections the FAQ hints point to ("Check our coupons page"). */
+const FAQ_TOPICS: { label: string; re: RegExp }[] = [
+  { label: "Vehicles", re: /vehicle|\bmakes?\b|\bbrands?\b/i },
+  { label: "Coupons", re: /coupon|special|discount|promo/i },
+  { label: "Careers", re: /career|\bjobs?\b|hiring|employ/i },
+];
+export type FaqLink = { question: string; line: string; label: string; requested: boolean };
+/**
+ * Finds the FAQ lines whose hint points to a page/section ("Are you hiring? - Check our careers page") and checks
+ * whether that page/section is one of the requested ones (Jira). No list in Jira → treated as not requested.
+ */
+export function faqLinks(prompt: string, pages: string[]): (FaqLink & { re: RegExp })[] {
+  const out: (FaqLink & { re: RegExp })[] = [];
+  for (const line of prompt.split("\n")) {
+    const m = line.match(/^(.*?\?)\s*[-–—:]\s*(.+)$/);
+    if (!m) continue;
+    const n = m[2].match(/\b(?:our|the)\s+([a-z][a-z &'-]{1,30}?)\s+(?:page|section|tab)\b/i);
+    if (!n) continue;
+    const noun = n[1].toLowerCase().trim();
+    const t = FAQ_TOPICS.find((x) => x.re.test(noun));
+    const re = t ? t.re : new RegExp(`\\b${reEsc(noun.replace(/s$/, ""))}`, "i");
+    out.push({ question: m[1].trim(), line, label: t?.label || noun, requested: pages.some((p) => re.test(p)), re });
+  }
+  return out;
+}
+/** Answers that still point to a page/section that wasn't requested. */
+export function faqStrayLinks(items: FaqItem[], links: { label: string; requested: boolean; re: RegExp }[]) {
+  const out: { q: string; label: string }[] = [];
+  for (const f of items) for (const l of links) {
+    if (l.requested) continue;
+    if (f.a.split(/(?<=[.!?])\s+/).some((x) => /\b(page|section|tab)s?\b/i.test(x) && l.re.test(x))) out.push({ q: f.q, label: l.label });
+  }
+  return out;
+}
+
 export async function genFaq(siteId: number, rev?: Rev) {
-  const { c, row, st, prompts, vars } = await project(siteId);
+  const { c, row, st, prompts, vars, rulesText } = await project(siteId);
   const variant: "faqPages" | "faqSections" = isOnePager(row) ? "faqSections" : "faqPages";
   const word = variant === "faqSections" ? "section" : "page";
-  const pages = c.pages.join(", ") || "(not listed — assume the site has them)";
-  const user = `SHOP DETAILS:\n${details(c)}\n\nMY PROMPT:\n${fillPrompt(prompts[variant], vars)}
+  // which hinted pages/sections were requested — hints to the others are removed before the AI sees the prompt
+  let promptText = fillPrompt(prompts[variant], vars);
+  const links = faqLinks(promptText, c.pages);
+  for (const l of links) if (!l.requested) promptText = promptText.replace(l.line, l.question);
+  const yes = links.filter((l) => l.requested), no = links.filter((l) => !l.requested);
+  const linkRules = [
+    yes.length ? `- These ${word}s WERE requested, so the answer may point to them (say "${word}"): ${yes.map((l) => `${l.label} (for "${l.question}")`).join("; ")}.` : "",
+    no.length ? `- These ${word}s were NOT requested: ${no.map((l) => l.label).join(", ")}. Never mention them or point to them in any answer — answer the question helpfully on its own. Never say or imply the website doesn't have them.` : "",
+  ].filter(Boolean).join("\n");
+  const user = `SHOP DETAILS:\n${details(c)}\n\nMY PROMPT:\n${promptText}
 
-REQUESTED PAGES/SECTIONS on this website: ${pages}
+REQUESTED PAGES/SECTIONS on this website: ${c.pages.join(", ") || "(none listed)"}
 - This is a ${variant === "faqSections" ? "one-page website: always say \"section\", never \"page\"" : "multi-page website: say \"page\""}.
-- When a FAQ's hint points to a ${word} that isn't in the requested list (e.g. vehicles, coupons, careers), answer the question helpfully without pointing to that ${word}. Never say or imply the website doesn't have a ${word}.
-- Use the shop's real hours and address from SHOP DETAILS. Keep each answer 1-3 sentences.
+${linkRules ? `${linkRules}\n` : ""}- Only point to a ${word} from the requested list. Never say or imply the website doesn't have a ${word}.
+- Use the shop's real hours and address from SHOP DETAILS. Keep each answer 1-3 sentences.${rulesText("faq")}
 
 Return ONLY JSON: {"faqs":[{"question":"","answer":""}]} — the 8 FAQs in the order given.${revisionBlock(rev && { ...rev, previous: rev.previous || st.faq?.text })}`;
   const r = await ask(user, 2500);
-  const j = parseJson<{ faqs?: { question?: string; answer?: string }[] }>(r.text) || {};
-  const items = (j.faqs || []).map((f) => ({ q: String(f.question || "").trim(), a: String(f.answer || "").trim() })).filter((f) => f.q && f.a);
+  const parse = (t: string) => ((parseJson<{ faqs?: { question?: string; answer?: string }[] }>(t) || {}).faqs || [])
+    .map((f) => ({ q: String(f.question || "").trim(), a: String(f.answer || "").trim() })).filter((f) => f.q && f.a);
+  const items = parse(r.text);
+  // one fix round when an answer still points to a page/section that wasn't requested
+  let stray = faqStrayLinks(items, links);
+  if (stray.length) {
+    try {
+      const bad = items.filter((f) => stray.some((x) => x.q === f.q));
+      const fx = await ask(`Rewrite these FAQ answers so they no longer mention or point to the ${no.map((l) => l.label.toLowerCase()).join(" / ")} ${word} (it isn't on this website). Answer the question helpfully on its own in 1-3 sentences, and don't say the website lacks anything.${rulesText("faq")}
+${bad.map((f) => `- question: ${f.q}\n  answer: ${f.a}`).join("\n")}
+Return ONLY JSON: {"faqs":[{"question":"","answer":""}]}`, 1500);
+      for (const x of parse(fx.text)) {
+        const f = items.find((y) => y.q.toLowerCase() === x.q.toLowerCase());
+        if (f && !faqStrayLinks([x], links).length) f.a = x.a;
+      }
+    } catch { /* keep the first answer */ }
+    stray = faqStrayLinks(items, links);
+  }
   const issues: string[] = [];
   if (items.length !== 8) issues.push(`${items.length} FAQs (needs 8)`);
+  for (const x of stray) issues.push(`"${x.q}" points to the ${x.label.toLowerCase()} ${word}, which wasn't requested — remove that part`);
   for (const f of items) {
     const n = sentences(f.a);
     if (n > 3) issues.push(`"${f.q}" has ${n} sentences (max 3)`);
@@ -429,7 +554,8 @@ Return ONLY JSON: {"faqs":[{"question":"","answer":""}]} — the 8 FAQs in the o
     if (variant === "faqSections" && /\bpage\b/i.test(f.a)) issues.push(`"${f.q}" says "page" on a one-page site`);
     const cs = cityWithoutState(f.a, c); if (cs) issues.push(`"${f.q}": ${cs}`);
   }
-  st.faq = { at: now(), provider: r.provider, issues, variant, items, text: items.map((f) => `${f.q}\n${f.a}`).join("\n\n") };
+  if (links.length && !c.pages.length) issues.push(`Jira doesn't list the requested ${word}s, so no answer points to a ${word}.`);
+  st.faq = { at: now(), provider: r.provider, issues, variant, items, text: items.map((f) => `${f.q}\n${f.a}`).join("\n\n"), links: links.map(({ question, label, requested }) => ({ question, line: "", label, requested })) };
   await savePromptState(siteId, st);
   return st.faq;
 }
@@ -444,10 +570,10 @@ const metaIssue = (m: MetaRow, shop: string) => {
   return out.join(", ");
 };
 export async function genMeta(siteId: number, pagesIn?: string[], rev?: Rev) {
-  const { c, row, st, prompts, vars } = await project(siteId);
+  const { c, row, st, prompts, vars, rulesText } = await project(siteId);
   const pages = (pagesIn?.length ? pagesIn : st.meta?.pages?.length ? st.meta.pages : metaPagesFor(c, row)).map((x) => x.trim()).filter(Boolean).slice(0, 40);
   const prompt = fillPrompt(prompts.meta, { ...vars, Meta_Pages: pages.join("\n") });
-  const r = await ask(`SHOP DETAILS:\n${details(c)}\n\nMY PROMPT:\n${prompt}
+  const r = await ask(`SHOP DETAILS:\n${details(c)}\n\nMY PROMPT:\n${prompt}${rulesText("meta")}
 
 Return ONLY JSON: {"pages":[{"page":"","title":"","description":""}]} — one entry per page above, in that order.
 Count characters including spaces: title under 70, description 150-160.${revisionBlock(rev && { ...rev, previous: rev.previous || (st.meta ? metaText(st.meta.rows) : "") })}`, 4000);
@@ -458,7 +584,7 @@ Count characters including spaces: title under 70, description 150-160.${revisio
   const bad = rows.filter((m) => metaIssue(m, shop));
   if (bad.length) {
     try {
-      const fx = await ask(`Rewrite these meta tags so each title is under 70 characters (format "[Title] in ${vars.City_State} | ${shop}") and each description is 150-160 characters (count spaces). Keep the meaning and the call to action.
+      const fx = await ask(`Rewrite these meta tags so each title is under 70 characters (format "[Title] in ${vars.City_State} | ${shop}") and each description is 150-160 characters (count spaces). Keep the meaning and the call to action.${rulesText("meta")}
 ${bad.map((m) => `- page "${m.page}" | title (${m.title.length}): ${m.title} | description (${m.description.length}): ${m.description}`).join("\n")}
 Return ONLY JSON: {"pages":[{"page":"","title":"","description":""}]}`, 3000);
       for (const x of parseJson<{ pages?: MetaRow[] }>(fx.text)?.pages || []) {
@@ -504,7 +630,7 @@ function serviceIssues(sp: ServicePage, service: string, c: Collection) {
   return out;
 }
 export async function genServicePage(siteId: number, service: string, rev?: Rev) {
-  const { c, row, st, prompts, vars } = await project(siteId);
+  const { c, row, st, prompts, vars, rulesText } = await project(siteId);
   if (isOnePager(row)) throw new HttpError(400, "Service pages are only for multi-page sites (not Basic / HP-only)");
   const name = service.trim().slice(0, 120);
   if (!name) throw new HttpError(400, "Which service?");
@@ -512,7 +638,7 @@ export async function genServicePage(siteId: number, service: string, rev?: Rev)
 - content: plain text. Separate paragraphs with a blank line. Content Section 3: the process paragraph, a blank line, then 3-5 benefit lines (one per line, no bullet characters).
 - Word counts: section 1 ≥ 100, section 2 = 2 paragraphs ≥ 300 words total, section 3 paragraph ≥ 100, section 4 = 2 paragraphs ≥ 300 words total.`;
   const prev = st.servicePages?.[name];
-  const r = await ask(`SHOP DETAILS:\n${details(c)}\n\nMY PROMPT:\n${fillPrompt(prompts.services, { ...vars, Service_Page: name })}\n\n${shape}${revisionBlock(rev && { ...rev, previous: rev.previous || (prev ? JSON.stringify({ sections: prev.sections, metaTitle: prev.metaTitle, metaDescription: prev.metaDescription }) : "") })}`, 6000);
+  const r = await ask(`SHOP DETAILS:\n${details(c)}\n\nMY PROMPT:\n${fillPrompt(prompts.services, { ...vars, Service_Page: name })}${rulesText("services")}\n\n${shape}${revisionBlock(rev && { ...rev, previous: rev.previous || (prev ? JSON.stringify({ sections: prev.sections, metaTitle: prev.metaTitle, metaDescription: prev.metaDescription }) : "") })}`, 6000);
   const parse = (t: string) => {
     const j = parseJson<{ sections?: { label?: string; title?: string; content?: string }[]; metaTitle?: string; metaDescription?: string }>(t) || {};
     return {
@@ -527,7 +653,7 @@ export async function genServicePage(siteId: number, service: string, rev?: Rev)
   const short = serviceIssues(sp, name, c).filter((x) => /words \(needs|paragraph\(s\)/.test(x));
   if (short.length) {
     try {
-      const fx = await ask(`Fix these problems in the service page for "${name}" and return the FULL page in the same JSON shape:\n${short.map((x) => `- ${x}`).join("\n")}\n\nCURRENT VERSION:\n${JSON.stringify(out)}\n\n${shape}`, 6000);
+      const fx = await ask(`Fix these problems in the service page for "${name}" and return the FULL page in the same JSON shape:\n${short.map((x) => `- ${x}`).join("\n")}\n\nCURRENT VERSION:\n${JSON.stringify(out)}${rulesText("services")}\n\n${shape}`, 6000);
       const fixed = parse(fx.text);
       if (fixed.sections.length === 4) { out = fixed; sp = { ...sp, ...out }; }
     } catch { /* keep the first answer */ }
@@ -615,7 +741,7 @@ export async function scanDestination(url: string): Promise<{ paths: string[]; e
 }
 
 export async function genRedirects(siteId: number, input: { oldText: string; destUrl: string; destText: string; fullAnchors: boolean }, rev?: Rev) {
-  const { c, st, prompts, vars } = await project(siteId);
+  const { c, st, prompts, vars, rulesText } = await project(siteId);
   const issues: string[] = [];
   const dests = [...new Set(splitLinesKeep(input.destText).map(destNorm))].slice(0, 400);
   if (!dests.length) throw new HttpError(400, "Add the destination pages first (scan the new site or paste them)");
@@ -634,7 +760,7 @@ export async function genRedirects(siteId: number, input: { oldText: string; des
   let rows: RedirectRow[] = [];
   let provider = "";
   try {
-    const r = await callAI({ system: SYSTEM.replace("Respond with JSON only.", "Respond with the raw CSV only."), user: `${prompt}${rev?.instruction ? `\n\nCHANGE REQUEST: ${rev.instruction.slice(0, 1500)}\nCURRENT CSV:\n${(rev.previous || (st.redirects ? redirectCsvParts(st.redirects.rows).join("") : "")).slice(0, 12000)}` : ""}`, json: false, maxTokens: 8000 });
+    const r = await callAI({ system: SYSTEM.replace("Respond with JSON only.", "Respond with the raw CSV only."), user: `${prompt}${rulesText("redirects")}${rev?.instruction ? `\n\nCHANGE REQUEST: ${rev.instruction.slice(0, 1500)}\nCURRENT CSV:\n${(rev.previous || (st.redirects ? redirectCsvParts(st.redirects.rows).join("") : "")).slice(0, 12000)}` : ""}`, json: false, maxTokens: 8000 });
     provider = `${r.provider}:${r.model}`;
     const text = r.text.replace(/^```\w*\n?|```\s*$/gm, "").trim();
     for (const cells of parseDelimited(text, ",")) {

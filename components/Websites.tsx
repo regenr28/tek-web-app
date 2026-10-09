@@ -36,7 +36,15 @@ const ageText = (d: number) => {
 const TEMP_AGES: [string, string, (d: number) => boolean][] = [
   ["2y", "2+ years", (d) => d >= 730], ["1y", "1–2 years", (d) => d >= 365 && d < 730], ["3m", "3–12 months", (d) => d >= 90 && d < 365], ["new", "Under 3 months", (d) => d < 90],
 ];
-const SORTS: [string, string][] = [["", "Newest created first"], ["created_asc", "Oldest created first"], ["first_asc", "Oldest first published"], ["temp_desc", "Longest on tekmetric.site"]];
+const SORTS: [string, string][] = [["", "Newest created first"], ["created_asc", "Oldest created first"], ["first_asc", "Oldest first published"], ["last_asc", "Oldest last published"], ["last_desc", "Recently published first"], ["temp_desc", "Longest on tekmetric.site"]];
+/** Days since a date (null when there's no date). */
+const sinceDays = (iso: string | null) => (iso ? Math.max(0, Math.floor((Date.now() - Date.parse(iso)) / 86_400_000)) : null);
+/** "Last published" quick filter — the first four are also the buckets in the tekmetric.site summary. */
+const LAST_AGES: [string, string, (d: number | null) => boolean][] = [
+  ["lt3m", "within 3 months", (d) => d !== null && d < 91], ["3m", "3–12 months ago", (d) => d !== null && d >= 91 && d < 365],
+  ["1y", "1–2 years ago", (d) => d !== null && d >= 365 && d < 730], ["2y", "2+ years ago", (d) => d !== null && d >= 730],
+  ["gt6m", "over 6 months ago", (d) => d !== null && d >= 182], ["gt1y", "over 1 year ago", (d) => d !== null && d >= 365], ["never", "never published", (d) => d === null],
+];
 const PAGE = 50;
 /** Overview groups: one tile each; "unhealthy" and "attention" have a second filter for the specific problem. */
 type Group = "" | "ok" | "unhealthy" | "attention" | "unchecked" | "launch" | "uptime";
@@ -52,7 +60,7 @@ const DOT: Record<string, string> = { ok: "var(--ok)", down: "var(--error)", dns
 function Strip({ list, size = 8, title }: { list: string[]; size?: number; title?: string }) {
   return <span title={title} style={{ display: "inline-flex", gap: 2, verticalAlign: "middle" }}>{list.map((h, i) => <span key={i} title={h} style={{ width: size, height: size * 1.6, borderRadius: 2, background: DOT[h] || "var(--warning)", opacity: DOT[h] ? 1 : 0.7 }} />)}</span>;
 }
-type Filters = { q: string; status: string; group: Group; problem: string; warning: string; launch?: string; uptime?: "below" | "down" | "lost"; tempAge?: string; sort?: string; labels: string[]; labelMode: "any" | "all"; template: string; domainType: string; createdFrom: string; createdTo: string; firstFrom: string; firstTo: string; lastFrom: string; lastTo: string };
+type Filters = { q: string; status: string; group: Group; problem: string; warning: string; launch?: string; uptime?: "below" | "down" | "lost"; tempAge?: string; lastAge?: string; sort?: string; labels: string[]; labelMode: "any" | "all"; template: string; domainType: string; createdFrom: string; createdTo: string; firstFrom: string; firstTo: string; lastFrom: string; lastTo: string };
 const EMPTY: Filters = { q: "", status: "", group: "", problem: "", warning: "", labels: [], labelMode: "any", template: "", domainType: "", createdFrom: "", createdTo: "", firstFrom: "", firstTo: "", lastFrom: "", lastTo: "" };
 const isTemplate = (l: string) => /^\d{1,3}$/.test(l);
 /** The filters in use, in words (shown on the history chart and in its PDF / Excel). */
@@ -63,6 +71,7 @@ function describeFilters(f: Filters) {
   if (f.labels.length) parts.push(`labels ${f.labels.join(f.labelMode === "all" ? " + " : " or ")}`);
   if (f.template) parts.push(`template ${f.template}`);
   if (f.domainType) parts.push(f.domainType === "custom" ? "custom domains only" : f.domainType === "temp_published" ? "published but only on tekmetric.site" : "staging domains only");
+  if (f.lastAge) parts.push(`last published ${LAST_AGES.find(([k]) => k === f.lastAge)?.[1] || ""}`);
   if (f.domainType === "temp_published" && f.tempAge) parts.push(`on tekmetric.site ${TEMP_AGES.find(([k]) => k === f.tempAge)?.[1] || ""}`);
   const range = (n: string, a: string, b: string) => { if (a || b) parts.push(`${n} ${a || "…"} to ${b || "…"}`); };
   range("created", f.createdFrom, f.createdTo); range("first published", f.firstFrom, f.firstTo); range("last published", f.lastFrom, f.lastTo);
@@ -125,6 +134,7 @@ export default function Websites() {
       if (td === null) return false;
       if (f.tempAge && !TEMP_AGES.find(([k]) => k === f.tempAge)?.[2](td)) return false;
     }
+    if (f.lastAge && !LAST_AGES.find(([k]) => k === f.lastAge)?.[2](sinceDays(r.last_publish))) return false;
     if (f.labels.length) { const ls = r.labels.split(","); if (f.labelMode === "all" ? !f.labels.every((l) => ls.includes(l)) : !f.labels.some((l) => ls.includes(l))) return false; }
     if (f.template && !r.labels.split(",").some((l) => isTemplate(l) && Number(l) === Number(f.template))) return false;
     const inRange = (v: string | null, from: string, to: string) => (!from || (!!v && day(v) >= from)) && (!to || (!!v && day(v) <= to));
@@ -202,13 +212,17 @@ export default function Websites() {
   const ts = (v: string | null, empty: number) => (v ? Date.parse(v) : empty);
   const ordered = sortKey === "created_asc" ? [...shown].sort((a, b) => ts(a.created_at, Infinity) - ts(b.created_at, Infinity))
     : sortKey === "first_asc" ? [...shown].sort((a, b) => ts(a.first_publish, Infinity) - ts(b.first_publish, Infinity))
+    : sortKey === "last_asc" ? [...shown].sort((a, b) => ts(a.last_publish, Infinity) - ts(b.last_publish, Infinity))
+    : sortKey === "last_desc" ? [...shown].sort((a, b) => ts(b.last_publish, -Infinity) - ts(a.last_publish, -Infinity))
     : sortKey === "temp_desc" ? [...shown].sort((a, b) => (tempDays(b) ?? -1) - (tempDays(a) ?? -1))
     : f.group === "launch" ? [...shown].sort((a, b) => (b.launch_days ?? -1) - (a.launch_days ?? -1))
     : f.group === "uptime" ? [...shown].sort((a, b) => (a.uptime_pct ?? 101) - (b.uptime_pct ?? 101)) : shown;
   // published on tekmetric.site: billed, but not on their own domain (summary for the "Published on tekmetric.site" filter)
   const temp = (() => {
     const all = (d.rows || []).map((r) => ({ r, td: tempDays(r) })).filter((x): x is { r: Row; td: number } => x.td !== null);
-    return { n: all.length, ages: TEMP_AGES.map(([k, l, test]) => ({ k, l, n: all.filter((x) => test(x.td)).length })), oldest: all.sort((a, b) => b.td - a.td)[0] };
+    return { n: all.length, ages: TEMP_AGES.map(([k, l, test]) => ({ k, l, n: all.filter((x) => test(x.td)).length })),
+      last: LAST_AGES.slice(0, 4).map(([k, l, test]) => ({ k, l, n: all.filter((x) => test(sinceDays(x.r.last_publish))).length })),
+      oldest: all.sort((a, b) => b.td - a.td)[0] };
   })();
   const pageRows = ordered.slice(page * PAGE, page * PAGE + PAGE);
   const wLabel = (k: string) => (k === "changed" ? "Health changed since a previous check" : k === "missing" ? "Not in the latest import (deleted in Duda?)" : d.flagLabels[k] || k);
@@ -293,7 +307,14 @@ export default function Websites() {
           <div className="row" style={{ flexWrap: "wrap", gap: 6 }}>
             <button className={`sm ${!f.tempAge ? "primary" : "ghost"}`} onClick={() => setF({ ...f, tempAge: "" })}>All {temp.n}</button>
             {temp.ages.map((a) => <button key={a.k} disabled={!a.n} className={`sm ${f.tempAge === a.k ? "primary" : "ghost"}`} onClick={() => setF({ ...f, tempAge: a.k })}>{a.l} {a.n}</button>)}
+            <span className="muted">on tekmetric.site</span>
           </div>
+          <div className="row" style={{ flexWrap: "wrap", gap: 6 }}>
+            <span className="muted">Last published:</span>
+            <button className={`sm ${!f.lastAge ? "primary" : "ghost"}`} onClick={() => setF({ ...f, lastAge: "" })}>Any</button>
+            {temp.last.map((a) => <button key={a.k} disabled={!a.n} className={`sm ${f.lastAge === a.k ? "primary" : "ghost"}`} onClick={() => setF({ ...f, lastAge: a.k, sort: a.k === "lt3m" ? "" : "last_asc" })}>{a.l} {a.n}</button>)}
+          </div>
+          <div className="muted">Recently republished = someone is still working on it (maybe waiting on DNS). Not republished for a year or more = probably forgotten — the best ones to follow up first.</div>
           {temp.oldest && <div className="muted">Oldest: <b>{temp.oldest.r.site_name || temp.oldest.r.domain}</b> — published {day(temp.oldest.r.first_publish || temp.oldest.r.created_at)}, {ageText(temp.oldest.td)} on tekmetric.site. Use <b>Export report</b> for the list.</div>}
         </div>
       )}
@@ -337,6 +358,9 @@ export default function Websites() {
             <option value="">Any domain</option><option value="custom">Custom domain</option><option value="staging">Staging (tekmetric.site…)</option>
             <option value="temp_published">Published on tekmetric.site (billed, no own domain)</option>
           </select>
+          <select style={{ maxWidth: 200 }} value={f.lastAge || ""} onChange={(e) => setF({ ...f, lastAge: e.target.value })} title="How long ago the site was last published in Duda">
+            <option value="">Last published: any time</option>{LAST_AGES.map(([k, l]) => <option key={k} value={k}>Last published {l}</option>)}
+          </select>
           <select style={{ maxWidth: 200 }} value={f.sort || ""} onChange={(e) => setF({ ...f, sort: e.target.value })} title="Order of the list">
             {SORTS.map(([k, l]) => <option key={k} value={k}>{k === "" && f.domainType === "temp_published" ? "Sort: longest on tekmetric.site" : `Sort: ${l.toLowerCase()}`}</option>)}
           </select>
@@ -374,7 +398,7 @@ export default function Websites() {
                     <td><b>{r.site_name}</b><div><a href={`https://${r.domain}/`} target="_blank" rel="noreferrer noopener" onClick={(e) => e.stopPropagation()}>{r.domain}</a></div><div className="muted">{r.alias}</div></td>
                     <td><span className={`badge ${r.duda_status === "PUBLISHED" ? "ok" : ""}`}>{r.duda_status.toLowerCase()}</span>{r.missing ? <div><span className="badge warning">not in last import</span></div> : null}</td>
                     <td>{r.labels.split(",").filter(Boolean).map((l) => <span key={l} className="badge" style={{ marginRight: 2 }}>{l}</span>)}</td>
-                    <td>{day(r.created_at)}</td><td>{day(r.first_publish) || "—"}</td><td>{day(r.last_publish) || "—"}</td>
+                    <td>{day(r.created_at)}</td><td>{day(r.first_publish) || "—"}</td><td>{day(r.last_publish) || "—"}{(() => { const n = sinceDays(r.last_publish); return n !== null && n >= 91 ? <div className="muted small">{ageText(n)} ago</div> : null; })()}</td>
                     <td>
                       <span className={`badge ${TONE[r.health] || ""}`}>{L[r.health] || r.health}</span>
                       {r.health_detail && <div className="muted" style={{ maxWidth: 380 }}>{r.health_detail}</div>}

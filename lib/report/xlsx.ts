@@ -1,6 +1,6 @@
 import { zip } from "./zip";
 import type { ReportData } from "./types";
-import { CREATOR, CREDIT } from "../credit";
+import { CREATOR, CREDIT, DEFAULT_APP_NAME } from "../credit";
 
 /**
  * Excel report (.xlsx) written by hand: Summary sheet with KPI tiles, tables and native Excel charts (line + doughnut),
@@ -140,7 +140,7 @@ export function buildXlsx(d: ReportData): Uint8Array {
   S1.push([c(d.title, S.title)]);
   S1.push([c(`${d.subtitle} · generated ${d.generated.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}`, S.muted)]);
   S1.push([c(d.filters ? `Filters: ${d.filters}` : "All websites (no filters)", S.muted)]);
-  S1.push([c(`Duda Preview Audit · ${CREDIT}`, S.muted)]);
+  S1.push([c(`${d.appName || DEFAULT_APP_NAME} · ${CREDIT}`, S.muted)]);
   S1.push([]);
   S1.push(d.series.map((_, i) => c(d.totals[i], S.kpiNum)));
   S1.push(d.series.map((s) => c(s.label, S.kpiLbl)));

@@ -1,6 +1,6 @@
 import { PdfDoc, textWidth, fit } from "./pdf";
 import type { ReportData } from "./types";
-import { CREDIT } from "../credit";
+import { CREDIT, DEFAULT_APP_NAME } from "../credit";
 
 /** Meeting-ready PDF (A4 landscape): headline numbers + trend chart, then the breakdown donut, then the table. */
 
@@ -146,7 +146,7 @@ export function buildPdf(d: ReportData): Uint8Array {
 
   return doc.build((pg, page, totalPages) => {
     pg.line(M, pg.H - 26, pg.W - M, pg.H - 26, { stroke: LINE, width: 0.5 });
-    pg.text(M, pg.H - 14, `Duda Preview Audit · All Websites · ${CREDIT}`, { size: 8, color: MUTED });
+    pg.text(M, pg.H - 14, `${d.appName || DEFAULT_APP_NAME} · All Websites · ${CREDIT}`, { size: 8, color: MUTED });
     pg.text(pg.W - M, pg.H - 14, `Page ${page} of ${totalPages}`, { size: 8, color: MUTED, align: "right" });
   });
 }

@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import { api } from "@/components/api";
+import { CREDIT } from "@/lib/credit";
 
 type Step = "loading" | "setup" | "login" | "mfa";
 
@@ -92,6 +93,7 @@ export default function Login() {
           </button>
         )}
         {step === "mfa" && <button type="button" className="ghost small" onClick={() => { setStep("login"); setErr(""); }}>Use a different account</button>}
+        <div className="muted small app-credit" style={{ textAlign: "center", borderTop: "1px solid var(--border)", paddingTop: 10 }}>{CREDIT}</div>
       </form>
     </div>
   );

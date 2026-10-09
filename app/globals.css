@@ -155,3 +155,6 @@ table.sheet td.rownum::before { content: counter(sheetrow); }
 @media (prefers-color-scheme: dark) { .viz { --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500; --grid: #262b35; } }
 .viz-tip { position: absolute; pointer-events: none; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; box-shadow: 0 4px 14px rgba(0,0,0,.12); font-size: 12px; white-space: nowrap; z-index: 5; }
 .viz-key { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
+
+/* creator credit (footer + sign-in page) */
+footer.app-credit { text-align: center; padding-top: 4px; padding-bottom: 24px; }

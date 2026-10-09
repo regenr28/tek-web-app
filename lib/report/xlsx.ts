@@ -1,5 +1,6 @@
 import { zip } from "./zip";
 import type { ReportData } from "./types";
+import { CREATOR, CREDIT } from "../credit";
 
 /**
  * Excel report (.xlsx) written by hand: Summary sheet with KPI tiles, tables and native Excel charts (line + doughnut),
@@ -135,10 +136,11 @@ const anchor = (id: number, rid: string, from: [number, number], to: [number, nu
 export function buildXlsx(d: ReportData): Uint8Array {
   // ---- Summary ----
   const S1: Cell[][] = [];
-  const merges: string[] = ["A1:C1", "A2:C2", "A3:C3"];
+  const merges: string[] = ["A1:C1", "A2:C2", "A3:C3", "A4:C4"];
   S1.push([c(d.title, S.title)]);
   S1.push([c(`${d.subtitle} · generated ${d.generated.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}`, S.muted)]);
   S1.push([c(d.filters ? `Filters: ${d.filters}` : "All websites (no filters)", S.muted)]);
+  S1.push([c(`Duda Preview Audit · ${CREDIT}`, S.muted)]);
   S1.push([]);
   S1.push(d.series.map((_, i) => c(d.totals[i], S.kpiNum)));
   S1.push(d.series.map((s) => c(s.label, S.kpiLbl)));
@@ -191,7 +193,7 @@ export function buildXlsx(d: ReportData): Uint8Array {
     "_rels/.rels": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/></Relationships>`,
     "docProps/core.xml": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><dc:title>${esc(d.title)}</dc:title><dc:creator>Duda Preview Audit</dc:creator><dcterms:created xsi:type="dcterms:W3CDTF">${d.generated.toISOString().slice(0, 19)}Z</dcterms:created></cp:coreProperties>`,
+<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><dc:title>${esc(d.title)}</dc:title><dc:creator>${esc(CREATOR)}</dc:creator><dcterms:created xsi:type="dcterms:W3CDTF">${d.generated.toISOString().slice(0, 19)}Z</dcterms:created></cp:coreProperties>`,
     "xl/workbook.xml": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><bookViews><workbookView activeTab="0"/></bookViews><sheets><sheet name="Summary" sheetId="1" r:id="rId1"/><sheet name="By period" sheetId="2" r:id="rId2"/><sheet name="Sites" sheetId="3" r:id="rId3"/></sheets>
 <definedNames><definedName name="_xlnm._FilterDatabase" localSheetId="2" hidden="1">Sites!$A$1:$K$${d.sites.length + 1}</definedName></definedNames><calcPr calcId="191029" fullCalcOnLoad="1"/></workbook>`,

@@ -54,6 +54,19 @@ const LOST = ["parked", "dns", "taken", "moved", "redirect"];
 /** Counted sites that don't load right now — the outages. */
 const OUTAGE = ["down", "error", "ssl", "not_found"];
 const WARNINGS = ["domain_expiring", "domain_hold", "ssl_expiring", "gbp_other", "gbp_none", "slow", "other_duda_site", "changed", "missing"];
+/** Short names for the reasons shown under the tiles. */
+const SHORT: Record<string, string> = {
+  domain_expiring: "domain renewal due", domain_hold: "domain on hold", ssl_expiring: "SSL expiring", gbp_other: "Google profile links elsewhere",
+  gbp_none: "Google profile has no website", slow: "slow to load", other_duda_site: "shows another Duda site", changed: "health changed", missing: "not in latest import",
+  redirect: "redirects away", moved: "moved off Duda", taken: "new owner", parked: "parked / expired", not_found: "404", error: "server error", dns: "domain not resolving", ssl: "SSL problem", down: "down",
+  unchecked: "waiting for first check", skipped: "not published in Duda", temp: "only on tekmetric.site",
+  not_launched: "not published yet", temp_domain: "still on tekmetric.site", billing_failed: "billing failed",
+};
+/** "Not checked" kinds (health values), in the order shown. */
+const NOT_CHECKED: [string, string][] = [["temp", "Only on the temporary tekmetric.site address — not live on their own domain yet"], ["skipped", "Not published in Duda (unpublished / in planning)"], ["unchecked", "Waiting for their first check"]];
+/** "3 renewal due · 2 slow" — the biggest reasons behind a tile's number. */
+const topReasons = (m: Record<string, number>, keys: string[], max = 3) =>
+  keys.filter((k) => m[k]).sort((a, b) => m[b] - m[a]).slice(0, max).map((k) => `${m[k].toLocaleString()} ${SHORT[k] || k}`).join(" · ");
 const LAUNCH: Record<string, string> = { not_launched: "Not published yet", temp_domain: "Live only on the temporary domain", billing_failed: "Duda billing failed" };
 /** colour of one check result in the uptime strip */
 const DOT: Record<string, string> = { ok: "var(--ok)", down: "var(--error)", dns: "var(--error)", ssl: "var(--error)", error: "var(--error)", not_found: "var(--error)", parked: "var(--error)" };
@@ -153,7 +166,7 @@ export default function Websites() {
     }
     if (f.group === "attention") { const w = warningsOf(r); return w.length > 0 && (!f.warning || w.includes(f.warning)); }
     if (f.group && groupOf(r) !== f.group) return false;
-    if (f.group === "unhealthy" && f.problem && r.health !== f.problem) return false;
+    if ((f.group === "unhealthy" || f.group === "unchecked") && f.problem && r.health !== f.problem) return false;
     return true;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }), [base, f.group, f.problem, f.warning, f.launch, f.uptime]);
@@ -226,13 +239,14 @@ export default function Websites() {
   })();
   const pageRows = ordered.slice(page * PAGE, page * PAGE + PAGE);
   const wLabel = (k: string) => (k === "changed" ? "Health changed since a previous check" : k === "missing" ? "Not in the latest import (deleted in Duda?)" : d.flagLabels[k] || k);
-  const tile = (g: Group, label: string, n: number, tone: string, hint: string) => {
+  const tile = (g: Group, label: string, n: number, tone: string, hint: string, desc?: string) => {
     const active = f.group === g;
     return (
       <button key={g || "all"} className="stat" title={hint}
         style={{ border: active ? "2px solid var(--accent)" : "2px solid transparent", textAlign: "left", cursor: "pointer", minWidth: 170 }}
         onClick={() => setF((x) => ({ ...x, group: x.group === g ? "" : g, problem: "", warning: "", launch: "" }))}>
         <b style={{ color: tone === "error" ? "var(--error)" : tone === "warning" ? "var(--warning)" : tone === "ok" ? "var(--ok)" : undefined }}>{n.toLocaleString()}</b><span>{label}</span>
+        {desc && <span className="muted" style={{ fontSize: 11, maxWidth: 210, lineHeight: 1.35, marginTop: 2 }}>{desc}</span>}
       </button>
     );
   };
@@ -283,12 +297,16 @@ export default function Websites() {
 
       {/* At a glance — click a tile to filter; pick the specific problem underneath */}
       <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
-        {tile("", "Websites", base.length, "", "Show all")}
-        {tile("ok", "Live on Duda", counts.h.ok || 0, "ok", "Domain loads and is still on Duda")}
-        {tile("unhealthy", "Unhealthy domains", counts.unhealthy, "error", "Redirects, moved off Duda, new owner, parked, 404, server error, DNS, SSL, down")}
-        {tile("attention", "Needs attention", counts.attention, "warning", "Live, but with a warning (renewal overdue, different Duda site, slow, changed, not in latest import)")}
-        {tile("unchecked", "Not checked", counts.unchecked, "", "Not checked yet, not published in Duda, or only on the temporary tekmetric.site address (not live yet)")}
-        {tile("launch", "Launch tracker", counts.launch, counts.launch ? "warning" : "", `Paid for but maybe not really live: not published ${d.settings.notLiveDays}+ days after creation, or published but only on the temporary tekmetric.site address for ${d.settings.tempDomainDays}+ days, or Duda billing failed`)}
+        {tile("", "Websites", base.length, "", "Show all", "Every site in Duda's site list (matching the filters below)")}
+        {tile("ok", "Live on Duda", counts.h.ok || 0, "ok", "Domain loads and is still on Duda", "Their own domain loads and shows our Duda site — all good")}
+        {tile("unhealthy", "Unhealthy domains", counts.unhealthy, "error", "Redirects, moved off Duda, new owner, parked, 404, server error, DNS, SSL, down",
+          topReasons(counts.h, UNHEALTHY) || "Domain doesn't show their Duda site (down, moved, expired…) — none right now")}
+        {tile("attention", "Needs attention", counts.attention, "warning", "Live, but with a warning (renewal overdue, different Duda site, slow, changed, not in latest import)",
+          counts.attention ? `Live, but: ${topReasons(counts.w, WARNINGS)}` : "Live sites with a warning (renewal due, Google profile…) — none right now")}
+        {tile("unchecked", "Not checked", counts.unchecked, "", "Not checked yet, not published in Duda, or only on the temporary tekmetric.site address (not live yet)",
+          topReasons(counts.h, NOT_CHECKED.map(([k]) => k)) || "Sites that aren't live yet, so there's nothing to check")}
+        {tile("launch", "Launch tracker", counts.launch, counts.launch ? "warning" : "", `Paid for but maybe not really live: not published ${d.settings.notLiveDays}+ days after creation, or published but only on the temporary tekmetric.site address for ${d.settings.tempDomainDays}+ days, or Duda billing failed`,
+          counts.launch ? `Paid for, maybe not live: ${topReasons(counts.lf, Object.keys(LAUNCH))}` : "Paid-for sites that never really went live — none right now")}
         <button className="stat" onClick={flipHistory} title="Sites created, first published and unpublished for good — per week, month or year" style={{ textAlign: "left", cursor: "pointer", minWidth: 150, border: showHistory ? "2px solid var(--accent)" : "2px solid transparent" }}><b>📈</b><span>{showHistory ? "Hide history" : "History chart"}</span></button>
         {counts.avgUptime !== null && (
           <button className="stat" onClick={() => setF((x) => ({ ...x, group: x.group === "uptime" ? "" : "uptime", uptime: "below", problem: "", warning: "", launch: "" }))}
@@ -321,6 +339,9 @@ export default function Websites() {
       {f.group === "uptime" && <UptimeExplainer c={counts.up} h={counts.h} avg={counts.avgUptime} L={L} pick={(u) => setF({ ...f, uptime: u })} active={f.uptime || "below"} />}
       {showHistory && <SitesHistory rows={base} filters={describeFilters(f)} />}
       {f.group === "launch" && (
+        <div className="muted small">Sites the shop is paying for that may not really be live: not published {d.settings.notLiveDays}+ days after they were created, published but still only on the temporary tekmetric.site address after {d.settings.tempDomainDays}+ days (their own domain was never connected), or Duda billing failed.</div>
+      )}
+      {f.group === "launch" && (
         <div className="row small" style={{ flexWrap: "wrap", gap: 6 }}>
           <span className="muted">Why:</span>
           <button className={`sm ${!f.launch ? "primary" : "ghost"}`} onClick={() => setF({ ...f, launch: "" })}>All {counts.launch}</button>
@@ -334,6 +355,22 @@ export default function Websites() {
           <button className={`sm ${!f.problem ? "primary" : "ghost"}`} onClick={() => setF({ ...f, problem: "" })}>All {counts.unhealthy}</button>
           {UNHEALTHY.filter((k) => counts.h[k]).map((k) => <button key={k} className={`sm ${f.problem === k ? "primary" : "ghost"}`} onClick={() => setF({ ...f, problem: k })}>{L[k]} {counts.h[k]}</button>)}
         </div>
+      )}
+      {f.group === "unchecked" && (
+        <div className="stack small" style={{ gap: 6 }}>
+          <div className="muted">These sites aren&apos;t live on their own domain yet, so there&apos;s nothing to check (they don&apos;t count in uptime). They&apos;re checked automatically once they&apos;re published on a custom domain.</div>
+          <div className="row" style={{ flexWrap: "wrap", gap: 6 }}>
+            <span className="muted">Why:</span>
+            <button className={`sm ${!f.problem ? "primary" : "ghost"}`} onClick={() => setF({ ...f, problem: "" })}>All {counts.unchecked}</button>
+            {NOT_CHECKED.filter(([k]) => counts.h[k]).map(([k, l]) => <button key={k} className={`sm ${f.problem === k ? "primary" : "ghost"}`} onClick={() => setF({ ...f, problem: k })}>{l} {counts.h[k]}</button>)}
+          </div>
+        </div>
+      )}
+      {f.group === "attention" && (
+        <div className="muted small">These sites load fine, but something needs a look before it becomes a problem — e.g. the domain renewal is due, or their Google Business Profile sends people to a different website.</div>
+      )}
+      {f.group === "unhealthy" && (
+        <div className="muted small">Their domain no longer shows the customer&apos;s Duda site: it&apos;s down, has an SSL/DNS problem, expired, or points somewhere else. Open a row for the exact error.</div>
       )}
       {f.group === "attention" && (
         <div className="row small" style={{ flexWrap: "wrap", gap: 6 }}>

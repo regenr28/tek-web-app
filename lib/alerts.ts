@@ -1,6 +1,10 @@
 import { all, one, run } from "./db";
 import { sendPush, pushSubject, type PushMessage } from "./push";
 import { summarize, type EventKind } from "./monitor";
+import { stagingSql } from "./health";
+
+/** Alerts for sites that are only on the temporary tekmetric.site address aren't real outages. */
+const LIVE_ONLY = `NOT ${stagingSql("COALESCE(w.domain, '')")}`;
 
 /** "What changed" feed for All Websites + browser push to the people who turned alerts on. */
 
@@ -8,7 +12,7 @@ export type AlertRow = { id: number; website_id: number; at: string; kind: Event
 
 export async function recentAlerts(limit = 200): Promise<AlertRow[]> {
   return all<AlertRow>(`SELECT e.id, e.website_id, e.at, e.kind, e.health, e.title, e.detail, COALESCE(w.site_name, '') AS site_name, COALESCE(w.domain, '') AS domain
-    FROM website_events e LEFT JOIN websites w ON w.id = e.website_id ORDER BY e.id DESC LIMIT ?`, [limit]);
+    FROM website_events e LEFT JOIN websites w ON w.id = e.website_id WHERE ${LIVE_ONLY} ORDER BY e.id DESC LIMIT ?`, [limit]);
 }
 export async function lastSeen(userId: number) {
   const r = await one<{ value: string }>("SELECT value FROM settings WHERE key = ?", [`alerts_seen:${userId}`]);
@@ -19,7 +23,8 @@ export async function markSeen(userId: number, id: number) {
 }
 export async function unreadCount(userId: number) {
   const seen = await lastSeen(userId);
-  return (await one<{ n: number }>("SELECT COUNT(*) AS n FROM website_events WHERE id > ? AND kind IN ('down','changed','warning','recovered')", [seen]))?.n || 0;
+  return (await one<{ n: number }>(`SELECT COUNT(*) AS n FROM website_events e LEFT JOIN websites w ON w.id = e.website_id
+    WHERE e.id > ? AND e.kind IN ('down','changed','warning','recovered') AND ${LIVE_ONLY}`, [seen]))?.n || 0;
 }
 
 /** Sends a notification to everyone who turned alerts on (and can still see All Websites). Removes dead subscriptions. */
@@ -44,12 +49,13 @@ export async function notifyAll(msg: PushMessage, onlyUser?: number): Promise<{ 
 export async function notifyRunFinished(runId: number) {
   const r = await one<{ started_at: string }>("SELECT started_at FROM health_runs WHERE id = ?", [runId]);
   if (!r) return;
-  const rows = await all<{ kind: EventKind; n: number }>("SELECT kind, COUNT(*) AS n FROM website_events WHERE at >= ? GROUP BY kind", [r.started_at]);
+  const rows = await all<{ kind: EventKind; n: number }>(`SELECT e.kind, COUNT(*) AS n FROM website_events e LEFT JOIN websites w ON w.id = e.website_id
+    WHERE e.at >= ? AND ${LIVE_ONLY} GROUP BY e.kind`, [r.started_at]);
   const counts = Object.fromEntries(rows.map((x) => [x.kind, x.n])) as Partial<Record<EventKind, number>>;
   const text = summarize(counts);
   if (!text) return;
   const down = await all<{ site_name: string; domain: string }>(`SELECT w.site_name, w.domain FROM website_events e JOIN websites w ON w.id = e.website_id
-    WHERE e.at >= ? AND e.kind = 'down' ORDER BY e.id LIMIT 3`, [r.started_at]);
+    WHERE e.at >= ? AND e.kind = 'down' AND ${LIVE_ONLY} ORDER BY e.id LIMIT 3`, [r.started_at]);
   await notifyAll({
     title: counts.down ? `⚠ ${counts.down} website${counts.down > 1 ? "s" : ""} went down` : "All Websites check: changes found",
     body: down.length ? `${down.map((d) => d.domain || d.site_name).join(", ")}${(counts.down || 0) > 3 ? "…" : ""} · ${text}` : text,

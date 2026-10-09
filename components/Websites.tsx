@@ -18,7 +18,7 @@ type Data = {
   healthLabels: Record<string, string>; healthOrder: string[]; flagLabels: Record<string, string>;
 };
 
-const TONE: Record<string, string> = { ok: "ok", redirect: "warning", moved: "warning", ssl: "warning", taken: "error", parked: "error", not_found: "error", error: "error", dns: "error", down: "error", unchecked: "", skipped: "" };
+const TONE: Record<string, string> = { ok: "ok", redirect: "warning", moved: "warning", ssl: "warning", taken: "error", parked: "error", not_found: "error", error: "error", dns: "error", down: "error", unchecked: "", skipped: "", temp: "" };
 const STAGING = /\.(tekmetric\.site|shopgenie\.site|multiscreensite\.com|dudaone\.com)$/i;
 const day = (iso: string | null) => (iso ? iso.slice(0, 10) : "");
 const PAGE = 50;
@@ -133,7 +133,7 @@ export default function Websites() {
       if (r.launch_flags.length) { launch++; for (const x of r.launch_flags) lf[x] = (lf[x] || 0) + 1; }
       // uptime: active sites only (a lost / moved domain isn't downtime)
       if (r.uptime_pct !== null && !LOST.includes(r.health)) { upSum += r.uptime_pct; upN++; if (r.uptime_pct < 100) below++; }
-      else if (!LOST.includes(r.health)) notCounted++;
+      else if (!LOST.includes(r.health) && r.health !== "temp") notCounted++;
       maxChecks = Math.max(maxChecks, r.uptime_checks || 0);
       h[r.health] = (h[r.health] || 0) + 1;
       const ws = warningsOf(r);
@@ -142,8 +142,8 @@ export default function Websites() {
     }
     const unhealthy = UNHEALTHY.reduce((n, k) => n + (h[k] || 0), 0);
     const sum = (ks: string[]) => ks.reduce((n, k) => n + (h[k] || 0), 0);
-    return { h, w, attention, unhealthy, unchecked: (h.unchecked || 0) + (h.skipped || 0), launch, lf, avgUptime: upN ? Math.round((upSum / upN) * 10) / 10 : null,
-      up: { counted: upN, below, maxChecks, notCounted, outage: sum(OUTAGE), lost: sum(LOST) } };
+    return { h, w, attention, unhealthy, unchecked: (h.unchecked || 0) + (h.skipped || 0) + (h.temp || 0), launch, lf, avgUptime: upN ? Math.round((upSum / upN) * 10) / 10 : null,
+      up: { counted: upN, below, maxChecks, notCounted, outage: sum(OUTAGE), lost: sum(LOST), temp: h.temp || 0 } };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [base]);
 
@@ -241,7 +241,7 @@ export default function Websites() {
         {tile("ok", "Live on Duda", counts.h.ok || 0, "ok", "Domain loads and is still on Duda")}
         {tile("unhealthy", "Unhealthy domains", counts.unhealthy, "error", "Redirects, moved off Duda, new owner, parked, 404, server error, DNS, SSL, down")}
         {tile("attention", "Needs attention", counts.attention, "warning", "Live, but with a warning (renewal overdue, different Duda site, slow, changed, not in latest import)")}
-        {tile("unchecked", "Not checked", counts.unchecked, "", "Not checked yet, or not published in Duda")}
+        {tile("unchecked", "Not checked", counts.unchecked, "", "Not checked yet, not published in Duda, or only on the temporary tekmetric.site address (not live yet)")}
         {tile("launch", "Launch tracker", counts.launch, counts.launch ? "warning" : "", `Paid for but maybe not really live: not published ${d.settings.notLiveDays}+ days after creation, or published but only on the temporary tekmetric.site address for ${d.settings.tempDomainDays}+ days, or Duda billing failed`)}
         <button className="stat" onClick={flipHistory} title="Sites created, first published and unpublished for good — per week, month or year" style={{ textAlign: "left", cursor: "pointer", minWidth: 150, border: showHistory ? "2px solid var(--accent)" : "2px solid transparent" }}><b>📈</b><span>{showHistory ? "Hide history" : "History chart"}</span></button>
         {counts.avgUptime !== null && (
@@ -348,7 +348,7 @@ export default function Websites() {
 
 /** What the uptime number is made of — so it can be explained (and checked) site by site. */
 function UptimeExplainer({ c, h, avg, L, pick, active }: {
-  c: { counted: number; below: number; maxChecks: number; notCounted: number; outage: number; lost: number }; h: Record<string, number>; avg: number | null;
+  c: { counted: number; below: number; maxChecks: number; notCounted: number; outage: number; lost: number; temp: number }; h: Record<string, number>; avg: number | null;
   L: Record<string, string>; pick: (u: "below" | "down" | "lost") => void; active: string;
 }) {
   const parts = (ks: string[]) => ks.filter((k) => h[k]).map((k) => `${L[k] || k} ${h[k].toLocaleString()}`).join(" · ");
@@ -364,7 +364,7 @@ function UptimeExplainer({ c, h, avg, L, pick, active }: {
     <div className="card stack small" style={{ boxShadow: "none", gap: 8 }}>
       <div><b>What&apos;s behind {avg ?? "—"}% uptime</b></div>
       <div className="muted">
-        Every scheduled check marks a site <b>up</b> (it loads and is live on Duda) or <b>down</b> (it doesn&apos;t load). Each site&apos;s uptime is its up-checks ÷ all checks over the last 30 days; the tile is the average of the active sites.
+        Every scheduled check marks a site <b>up</b> (it loads and is live on Duda) or <b>down</b> (it doesn&apos;t load). Each site&apos;s uptime is its up-checks ÷ all checks over the last 30 days; the tile is the average of the active sites on their own domain (sites still on the temporary tekmetric.site address aren&apos;t live yet, so they&apos;re not counted).
         {c.maxChecks > 0 && c.maxChecks < 14 && <> <b>History is still short</b> — at most {c.maxChecks} check{c.maxChecks > 1 ? "s" : ""} per site so far, so a site that failed once shows a low % and pulls the average down. It settles as daily checks build up.</>}
       </div>
       <table className="t small" style={{ maxWidth: 980 }}>
@@ -373,6 +373,7 @@ function UptimeExplainer({ c, h, avg, L, pick, active }: {
           {row("below", "…of which below 100%", c.below, "had at least one failed check in 30 days — sorted lowest first", c.below ? "var(--warning)" : "var(--ok)")}
           {row("down", "…of which not loading right now", c.outage, parts(OUTAGE) || "none", c.outage ? "var(--error)" : "var(--ok)")}
           {row("lost", "Not counted — domain lost or left Duda", c.lost, parts(LOST) || "none", "var(--muted)")}
+          {row("", "Not counted — only on the temporary tekmetric.site address", c.temp, "not live on their own domain yet — see the Launch tracker", "var(--muted)")}
           {row("", "Not counted — no checks yet / not published", c.notCounted, "they join once they've been checked", "var(--muted)")}
         </tbody>
       </table>

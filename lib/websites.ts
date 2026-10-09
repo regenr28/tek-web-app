@@ -3,7 +3,7 @@ import { all, one, run, batch } from "./db";
 import { parseCsv } from "./parse";
 import { HttpError } from "./security";
 import { sha256, randomToken } from "./secrets";
-import { checkWebsite, HEALTH_LABEL, FLAG_LABEL, type Health } from "./health";
+import { checkWebsite, HEALTH_LABEL, FLAG_LABEL, stagingSql, type Health } from "./health";
 import { addPoint, trackIncidents, eventsFor, uptimeStats, launchStatus, DEFAULT_LAUNCH, type UptimePoint, type Incident } from "./monitor";
 import { notifyRunFinished } from "./alerts";
 
@@ -87,7 +87,19 @@ export type WebsiteRow = {
 };
 type RawRow = Omit<WebsiteRow, "recent" | "launch_flags" | "launch_days" | "gbp_status" | "gbp_website"> & { uptime_recent: string; gbp_json: string | null; billing_failed: number };
 
+/**
+ * Sites only on the temporary tekmetric.site address aren't live yet: they're not checked and their old checks
+ * (always "SSL problem" there) don't count as downtime. Clears what earlier checks stored (cheap; no-op once done).
+ */
+async function clearTemporaryDomains() {
+  await run(`UPDATE websites SET health = 'temp', prev_health = NULL, health_changed_at = NULL,
+      health_detail = 'Temporary address — the site isn''t live on its own domain yet, so it isn''t checked or counted in uptime.',
+      health_flags = '["staging_domain"]', uptime_json = NULL, incidents_json = NULL, uptime_pct = NULL, uptime_checks = 0, uptime_recent = '', open_incident = NULL
+    WHERE health NOT IN ('temp', 'skipped') AND ${stagingSql("domain")}`);
+}
+
 export async function listWebsites(): Promise<WebsiteRow[]> {
+  await clearTemporaryDomains();
   const meta = await importMeta();
   const settings = await healthSettings();
   const raw = await all<RawRow>(`SELECT id, alias, site_name, domain, duda_status, created_at, first_publish, last_publish, subscription, labels, health, health_detail, health_flags,
@@ -133,11 +145,12 @@ export async function checkOne(id: number) {
 }
 
 async function saveCheck(s: Site, r: Awaited<ReturnType<typeof checkWebsite>>) {
-  const changed = s.health !== r.health && !["unchecked", "skipped"].includes(s.health);
+  const temp = r.health === "temp"; // only on the temporary address: no uptime history, incidents or alerts
+  const changed = !temp && s.health !== r.health && !["unchecked", "skipped", "temp"].includes(s.health);
   // uptime history, incidents and the "What changed" feed
   const at = new Date().toISOString();
-  const points = addPoint(parse<UptimePoint[]>(s.uptime_json, []), { t: at, h: r.health, ...(r.info.ms ? { ms: r.info.ms } : {}) });
-  const incidents = trackIncidents(parse<Incident[]>(s.incidents_json, []), s.health, r.health, r.detail, at);
+  const points = temp ? [] : addPoint(parse<UptimePoint[]>(s.uptime_json, []), { t: at, h: r.health, ...(r.info.ms ? { ms: r.info.ms } : {}) });
+  const incidents = temp ? [] : trackIncidents(parse<Incident[]>(s.incidents_json, []), s.health, r.health, r.detail, at);
   const events = eventsFor({ health: s.health, flags: parse<string[]>(s.health_flags, []) }, { health: r.health, flags: r.flags, detail: r.detail }, HEALTH_LABEL, FLAG_LABEL);
   if (events.length) await batch(events.map((e) => ({ sql: "INSERT INTO website_events (website_id, kind, health, title, detail) VALUES (?,?,?,?,?)", args: [s.id, e.kind, e.health, e.title.slice(0, 200), e.detail.slice(0, 500)] })));
   const st = uptimeStats(points, 30);

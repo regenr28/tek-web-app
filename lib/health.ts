@@ -10,7 +10,7 @@ import { nameSimilarity, harvestGbp } from "./research";
  * and the domain's registration record (RDAP — the free, official replacement for WHOIS).
  */
 
-export type Health = "ok" | "redirect" | "moved" | "taken" | "parked" | "not_found" | "error" | "dns" | "ssl" | "down" | "unchecked" | "skipped";
+export type Health = "ok" | "redirect" | "moved" | "taken" | "parked" | "not_found" | "error" | "dns" | "ssl" | "down" | "unchecked" | "skipped" | "temp";
 export const HEALTH_LABEL: Record<Health, string> = {
   ok: "Live on Duda",
   redirect: "Redirects to another domain",
@@ -24,9 +24,10 @@ export const HEALTH_LABEL: Record<Health, string> = {
   down: "Down / timeout",
   unchecked: "Not checked yet",
   skipped: "Not live in Duda (not checked)",
+  temp: "Temporary address only (not live yet)",
 };
 /** Order used for the overview tiles (problems first after "ok"). */
-export const HEALTH_ORDER: Health[] = ["ok", "redirect", "moved", "taken", "parked", "not_found", "error", "dns", "ssl", "down", "unchecked", "skipped"];
+export const HEALTH_ORDER: Health[] = ["ok", "redirect", "moved", "taken", "parked", "not_found", "error", "dns", "ssl", "down", "temp", "unchecked", "skipped"];
 
 export type Flag = "domain_expiring" | "domain_hold" | "ssl_expiring" | "slow" | "other_duda_site" | "staging_domain" | "gbp_other" | "gbp_none";
 export const FLAG_LABEL: Record<Flag, string> = {
@@ -58,6 +59,9 @@ export type CheckResult = {
 const STAGING = /\.(tekmetric\.site|shopgenie\.site|multiscreensite\.com|dudaone\.com|mydudapreview\.com)$/i;
 const TWO_LEVEL = /\.(co|com|net|org|gov|edu|ac)\.[a-z]{2}$/i;
 export const isStaging = (host: string) => STAGING.test(host);
+/** SQL condition for the same temporary addresses (`col` = the domain column). */
+export const stagingSql = (col: string) => `(${["tekmetric.site", "shopgenie.site", "multiscreensite.com", "dudaone.com", "mydudapreview.com"].map((d) => `LOWER(${col}) LIKE '%.${d}'`).join(" OR ")})`;
+export const TEMP_DETAIL = (host: string) => `${host} is the temporary address — the site isn't live on its own domain yet, so it isn't checked or counted in uptime.`;
 export function registrable(host: string) {
   const h = host.toLowerCase().replace(/^www\./, "").replace(/\.$/, "");
   const parts = h.split(".");
@@ -171,7 +175,8 @@ export async function checkWebsite(site: { domain: string; site_name: string; al
   // Local tests only (never on Vercel): "localhost:PORT" stands in for a domain — no DNS / SSL / registry lookups
   const testHost = process.env.ALLOW_PRIVATE_FETCH === "1" && !process.env.VERCEL && /^(localhost|127\.0\.0\.1):\d+$/.test(host);
   if (!testHost && !/^[a-z0-9.-]+\.[a-z]{2,}$/.test(host)) return { health: "dns", detail: `"${site.domain}" isn't a valid domain`, flags, info };
-  if (isStaging(host)) flags.push("staging_domain");
+  // the temporary tekmetric.site address isn't the real live site (and has no valid SSL) — nothing to monitor yet
+  if (isStaging(host) && !testHost) return { health: "temp", detail: TEMP_DETAIL(host), flags: ["staging_domain"], info };
   if (testHost) opts = { ...opts, rdap: false };
 
   // 1) DNS

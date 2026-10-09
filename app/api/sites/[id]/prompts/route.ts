@@ -6,7 +6,7 @@ import { loadProject } from "@/lib/projects";
 import { aiAvailable } from "@/lib/ai";
 import {
   getPromptState, savePromptState, isOnePager, serviceAreasOf, splitAreas, metaPagesFor, defaultServices, defaultOldUrls, promptVars,
-  genLocation, genFaq, genMeta, genServicePage, genRedirects, scanDestination, metaCsv, metaText, servicesCsv, serviceText, redirectCsvParts,
+  getPromptRules, rulesFor, genLocation, genFaq, genMeta, genServicePage, genRedirects, scanDestination, metaCsv, metaText, servicesCsv, serviceText, redirectCsvParts,
   type PromptState,
 } from "@/lib/prompts";
 
@@ -17,14 +17,17 @@ async function view(siteId: number, st?: PromptState) {
   const s = st || (await getPromptState(siteId));
   const services = s.services ?? defaultServices(p.collection);
   const onePager = isOnePager(p.row);
+  const areas = serviceAreasOf(s, p.evidence);
+  const rules = await getPromptRules();
   return {
     onePager, template: p.row.template, projectType: p.row.project_type,
-    vars: promptVars(p.collection, p.row, s.services),
+    vars: promptVars(p.collection, p.row, s.services, areas.list),
+    rules: Object.fromEntries((["location", "faq", "meta", "services", "redirects"] as const).map((k) => [k, rulesFor(rules, k)])) as Record<"location" | "faq" | "meta" | "services" | "redirects", string[]>,
     services,
     metaPagesDefault: metaPagesFor(p.collection, p.row),
     oldUrlsDefault: defaultOldUrls(p.evidence),
     destUrlDefault: p.row.preview_url || "",
-    serviceAreas: serviceAreasOf(s, p.evidence),
+    serviceAreas: areas,
     domain: p.collection.fields.domain.value,
     location: s.location || null,
     faq: s.faq || null,

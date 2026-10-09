@@ -359,7 +359,7 @@ function ResearchSettings({ canEdit }: { canEdit: boolean }) {
 
 type HpLib = { rules: string; prompts: { id: string; name: string; prompt: string }[]; importedAt?: string };
 /** The team's homepage prompts (one per template) and the rules added to every prompt. */
-type PromptLib = { prompts: Record<string, string> & { custom: string[] }; defaults: Record<string, string>; info: { key: string; label: string; help: string }[]; variables: [string, string][] };
+type PromptLib = { prompts: Record<string, string> & { custom: string[] }; rules: Record<string, string>; defaults: Record<string, string>; info: { key: string; label: string; help: string }[]; variables: [string, string][] };
 
 /** Settings → Prompts: Homepage (per template) + Location, FAQ, Meta, Service pages, URL redirects. */
 function PromptSettings() {
@@ -376,6 +376,7 @@ function PromptSettings() {
     catch (e) { setErr((e as Error).message); }
   };
   const info = lib?.info.find((x) => x.key === cat);
+  const ruleKey = cat === "faqPages" || cat === "faqSections" ? "faq" : cat;
   return (
     <div className="stack">
       <div className="row" style={{ gap: 6 }}>{cats.map(([k, l]) => <button key={k} className={`sm ${cat === k ? "primary" : ""}`} onClick={() => setCat(k)}>{l}</button>)}</div>
@@ -392,8 +393,38 @@ function PromptSettings() {
             <table className="t small"><tbody>{lib.variables.map(([k, d]) => <tr key={k}><td style={{ width: 200 }}><code>{`{{${k}}}`}</code></td><td>{d}</td></tr>)}</tbody></table>
           </details>
           {msg && <div className="alert">{msg}</div>}{err && <div className="alert error">{err}</div>}
+          <RulesBox lib={lib} setLib={setLib} k={ruleKey} title={`General rules — ${ruleKey === "faq" ? "FAQ (both versions)" : info?.label || cat}`}
+            help="Sent together with the prompt above in the same AI request, so the first answer already follows them (no need to Revise afterwards). One rule per line." />
+          <RulesBox lib={lib} setLib={setLib} k="all" title="General rules — every prompt (Location, FAQ, Meta, Services, URL Redirects)"
+            help="Added to all of these prompts. The Homepage prompts have their own rules box on the Homepage tab." />
         </div>
       )}
+    </div>
+  );
+}
+
+/** One "General rules" box (saved separately from the prompt; "" = no rules). */
+function RulesBox({ lib, setLib, k, title, help }: { lib: PromptLib; setLib: (l: PromptLib) => void; k: string; title: string; help: string }) {
+  const saved = lib.rules?.[k] || "";
+  const [t, setT] = useState(saved);
+  const [msg, setMsg] = useState(""); const [err, setErr] = useState("");
+  useEffect(() => { setT(saved); setMsg(""); }, [saved, k]);
+  const save = async () => {
+    setErr(""); setMsg("");
+    try { const r = await api<PromptLib>("/api/settings/prompts", { method: "PUT", body: { rules: k, text: t } }); setLib(r); setMsg(t.trim() ? "Rules saved." : "Rules cleared."); }
+    catch (e) { setErr((e as Error).message); }
+  };
+  return (
+    <div className="card stack" style={{ boxShadow: "none", gap: 6 }}>
+      <b>{title}</b>
+      <span className="muted small">{help}</span>
+      <textarea rows={Math.min(12, Math.max(4, t.split("\n").length + 1))} value={t} onChange={(e) => setT(e.target.value)}
+        placeholder={"e.g.\nNever use the words \"top-notch\" or \"nestled\".\nWrite in a friendly, local tone.\nAlways write the city as City, ST."} />
+      <div className="row">
+        <button className="primary sm" disabled={t.trim() === saved.trim()} onClick={save}>Save rules</button>
+        {msg && <span className="muted small">{msg}</span>}
+      </div>
+      {err && <div className="alert error">{err}</div>}
     </div>
   );
 }

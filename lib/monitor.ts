@@ -52,7 +52,7 @@ export const ALERT_FLAGS = new Set(["domain_expiring", "domain_hold", "ssl_expir
  */
 export function eventsFor(prev: { health: string; flags: string[] }, next: { health: string; flags: string[]; detail: string },
   labels: Record<string, string>, flagLabels: Record<string, string>): SiteEvent[] {
-  if (["unchecked", "skipped", ""].includes(prev.health)) return [];
+  if (["unchecked", "skipped", "temp", ""].includes(prev.health) || next.health === "temp") return [];
   const ev: SiteEvent[] = [];
   const L = (h: string) => labels[h] || h;
   if (prev.health !== next.health) {

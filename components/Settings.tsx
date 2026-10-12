@@ -14,22 +14,20 @@ export default function Settings({ me, dudaApi }: { me: Me; dudaApi: boolean }) 
       <h1>Settings</h1>
       <div className="card">
         <div className="tabs">
-          {isSuper && <button className={tab === "general" ? "active" : ""} onClick={() => setTab("general")}>General</button>}
           {isSuper && <button className={tab === "security" ? "active" : ""} onClick={() => setTab("security")}>Security</button>}
           {isSuper && <button className={tab === "ai" ? "active" : ""} onClick={() => setTab("ai")}>AI providers</button>}
           {isAdmin && <button className={tab === "research" ? "active" : ""} onClick={() => setTab("research")}>Research</button>}
-          {isAdmin && <button className={tab === "homepage" ? "active" : ""} onClick={() => setTab("homepage")}>Prompts</button>}
+          {isAdmin && <button className={tab === "homepage" ? "active" : ""} onClick={() => setTab("homepage")}>Homepage prompts</button>}
           {isAdmin && <button className={tab === "members" ? "active" : ""} onClick={() => setTab("members")}>Members</button>}
           <button className={tab === "duda" ? "active" : ""} onClick={() => setTab("duda")}>Duda API</button>
           {isSuper && <button className={tab === "log" ? "active" : ""} onClick={() => setTab("log")}>Security log</button>}
         </div>
         {tab === "ai" && isSuper && <AiSettings />}
         {tab === "research" && isAdmin && <ResearchSettings canEdit={isSuper} />}
-        {tab === "homepage" && isAdmin && <PromptSettings />}
+        {tab === "homepage" && isAdmin && <HomepagePrompts />}
         {tab === "members" && isAdmin && <Members me={me} />}
         {tab === "duda" && <DudaInfo enabled={dudaApi} />}
         {tab === "security" && isSuper && <SecuritySettings />}
-        {tab === "general" && isSuper && <GeneralSettings />}
         {tab === "log" && isSuper && <SecurityLog />}
       </div>
     </div>
@@ -124,39 +122,9 @@ function AiSettings() {
   );
 }
 
-/** Settings → General (Super Admin): the app's name. */
-function GeneralSettings() {
-  const [d, setD] = useState<{ appName: string; defaultName: string } | null>(null);
-  const [name, setName] = useState("");
-  const [msg, setMsg] = useState(""); const [err, setErr] = useState("");
-  useEffect(() => { api<{ appName: string; defaultName: string }>("/api/settings/general").then((x) => { setD(x); setName(x.appName); }).catch((e) => setErr(e.message)); }, []);
-  const save = async (v: string) => {
-    setMsg(""); setErr("");
-    try { const x = await api<{ appName: string; defaultName: string }>("/api/settings/general", { method: "PUT", body: { appName: v } }); setD(x); setName(x.appName); setMsg("Saved — reload the page to see the new name everywhere."); }
-    catch (e) { setErr((e as Error).message); }
-  };
-  if (!d) return <p className="muted">{err || "Loading…"}</p>;
-  return (
-    <div className="stack" style={{ maxWidth: 560 }}>
-      <label className="field"><span>App name</span>
-        <input value={name} maxLength={60} onChange={(e) => setName(e.target.value)} placeholder={d.defaultName} />
-        <span className="muted small">Shown in the top bar, on the sign-in page, in the browser tab and on PDF / Excel reports.</span>
-      </label>
-      <div className="row">
-        <button className="primary sm" disabled={!name.trim() || name.trim() === d.appName} onClick={() => save(name)}>Save</button>
-        {d.appName !== d.defaultName && <button className="sm ghost" onClick={() => save("")}>Reset to “{d.defaultName}”</button>}
-      </div>
-      {msg && <div className="alert">{msg}</div>}{err && <div className="alert error">{err}</div>}
-    </div>
-  );
-}
-
-const ACCESS_OPTIONS: [string, string][] = [["websites", "All Websites only"], ["projects", "Projects only"], ["all", "Projects + All Websites"]];
-
 function Members({ me }: { me: Me }) {
   const [list, setList] = useState<(Member & { created_at: string; mfa_enabled?: number; last_login_at?: string | null })[]>([]);
-  const blank = { name: "", email: "", password: "", role: "member", access: "websites", history: true };
-  const [f, setF] = useState(blank);
+  const [f, setF] = useState({ name: "", email: "", password: "", role: "member" });
   const [err, setErr] = useState(""); const [ok, setOk] = useState("");
   const load = () => api<(Member & { created_at: string })[]>("/api/users").then(setList);
   useEffect(() => { load(); }, []);
@@ -164,8 +132,7 @@ function Members({ me }: { me: Me }) {
 
   async function add(e: React.FormEvent) {
     e.preventDefault(); setErr(""); setOk("");
-    const body = isSuper ? { ...f, access: f.role === "super_admin" ? "all" : f.access } : { name: f.name, email: f.email, password: f.password, role: f.role };
-    try { await api("/api/users", { body }); setOk(`Created ${f.email}. Share the temporary password privately — on first sign-in they must choose their own password and set up 2FA.`); setF(blank); load(); }
+    try { await api("/api/users", { body: f }); setOk(`Created ${f.email}. Share the temporary password privately — on first sign-in they must choose their own password and set up 2FA.`); setF({ name: "", email: "", password: "", role: "member" }); load(); }
     catch (e) { setErr((e as Error).message); }
   }
   async function patch(id: number, b: Record<string, unknown>) {
@@ -191,19 +158,13 @@ function Members({ me }: { me: Me }) {
               {isSuper && <option value="super_admin">Super Admin — + AI keys & settings</option>}
             </select>
           </label>
-          {isSuper && f.role !== "super_admin" && <label className="field"><span>Can see</span>
-            <select value={f.access} onChange={(e) => setF({ ...f, access: e.target.value })}>
-              {ACCESS_OPTIONS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
-            </select>
-            {f.access !== "projects" && <span className="row small" style={{ gap: 6 }}><input type="checkbox" style={{ width: "auto" }} checked={f.history} onChange={(e) => setF({ ...f, history: e.target.checked })} /> History chart (All Websites)</span>}
-          </label>}
         </div>
         <div><button className="primary">Add member</button></div>
         {err && <div className="alert error">{err}</div>}
         {ok && <div className="alert">{ok}</div>}
       </form>
       <table className="t">
-        <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Can see</th><th>2FA</th><th>Last sign-in</th><th>Status</th><th></th></tr></thead>
+        <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>2FA</th><th>Last sign-in</th><th>Status</th><th></th></tr></thead>
         <tbody>{list.map((u) => (
           <tr key={u.id} className={u.active ? "" : "done"}>
             <td>{u.name}{u.id === me.id && <span className="muted small"> (you)</span>}</td>
@@ -212,17 +173,6 @@ function Members({ me }: { me: Me }) {
               <select value={u.role} disabled={!isSuper || u.id === me.id} onChange={(e) => patch(u.id, { role: e.target.value })} style={{ width: 140 }}>
                 <option value="member">Member</option><option value="admin">Admin</option><option value="super_admin">Super Admin</option>
               </select>
-            </td>
-            <td>
-              {u.role === "super_admin" ? <span className="muted small">Everything</span>
-                : <div className="stack" style={{ gap: 4 }}>
-                  <select value={u.access || "all"} disabled={!isSuper || u.id === me.id} onChange={(e) => patch(u.id, { access: e.target.value })} style={{ width: 170 }} title="Which main areas this person can open">
-                    {ACCESS_OPTIONS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
-                  </select>
-                  {u.access !== "projects" && <label className="row small" style={{ gap: 6, flexWrap: "nowrap" }} title="The History chart on All Websites (and its PDF / Excel downloads)">
-                    <input type="checkbox" style={{ width: "auto" }} checked={u.can_history !== 0} disabled={!isSuper || u.id === me.id} onChange={(e) => patch(u.id, { history: e.target.checked })} /> History chart
-                  </label>}
-                </div>}
             </td>
             <td>{u.mfa_enabled ? <span className="badge ok">On</span> : <span className="badge warning">Off</span>}</td>
             <td className="small">{ago(u.last_login_at)}</td>
@@ -394,76 +344,6 @@ function ResearchSettings({ canEdit }: { canEdit: boolean }) {
 
 type HpLib = { rules: string; prompts: { id: string; name: string; prompt: string }[]; importedAt?: string };
 /** The team's homepage prompts (one per template) and the rules added to every prompt. */
-type PromptLib = { prompts: Record<string, string> & { custom: string[] }; rules: Record<string, string>; defaults: Record<string, string>; info: { key: string; label: string; help: string }[]; variables: [string, string][] };
-
-/** Settings → Prompts: Homepage (per template) + Location, FAQ, Meta, Service pages, URL redirects. */
-function PromptSettings() {
-  const [cat, setCat] = useState("homepage");
-  const [lib, setLib] = useState<PromptLib | null>(null);
-  const [text, setText] = useState("");
-  const [err, setErr] = useState(""); const [msg, setMsg] = useState("");
-  useEffect(() => { if (cat !== "homepage" && !lib) api<PromptLib>("/api/settings/prompts").then(setLib).catch((e) => setErr(e.message)); }, [cat, lib]);
-  useEffect(() => { if (lib && cat !== "homepage") setText(lib.prompts[cat] || ""); setMsg(""); }, [cat, lib]);
-  const cats: [string, string][] = [["homepage", "Homepage"], ["location", "Location"], ["faqPages", "FAQ (pages)"], ["faqSections", "FAQ (one-page)"], ["meta", "Meta"], ["services", "Services"], ["redirects", "URL Redirects"]];
-  const save = async (t: string) => {
-    setErr(""); setMsg("");
-    try { const r = await api<PromptLib>("/api/settings/prompts", { method: "PUT", body: { key: cat, text: t } }); setLib(r); setText(r.prompts[cat]); setMsg(t.trim() ? "Saved." : "Back to the default prompt."); }
-    catch (e) { setErr((e as Error).message); }
-  };
-  const info = lib?.info.find((x) => x.key === cat);
-  const ruleKey = cat === "faqPages" || cat === "faqSections" ? "faq" : cat;
-  return (
-    <div className="stack">
-      <div className="row" style={{ gap: 6 }}>{cats.map(([k, l]) => <button key={k} className={`sm ${cat === k ? "primary" : ""}`} onClick={() => setCat(k)}>{l}</button>)}</div>
-      {cat === "homepage" ? <HomepagePrompts /> : !lib ? <p className="muted">{err || "Loading…"}</p> : (
-        <div className="stack" style={{ maxWidth: 900 }}>
-          <p className="muted small" style={{ margin: 0 }}>{info?.help} Used on each project&apos;s <b>Prompts</b> tab. {lib.prompts.custom.includes(cat) ? <b>Edited by your team.</b> : "Default prompt."}</p>
-          <textarea className="mono" rows={24} value={text} onChange={(e) => setText(e.target.value)} />
-          <div className="row">
-            <button className="primary sm" disabled={text === lib.prompts[cat]} onClick={() => save(text)}>Save</button>
-            {lib.prompts.custom.includes(cat) && <button className="sm ghost" onClick={() => { if (confirm("Go back to the default prompt?")) save(""); }}>Reset to default</button>}
-            <span className="muted small">Pasting a spreadsheet formula (=&quot;… &quot; &amp; Shop_Name &amp; &quot; …&quot;) is fine — it&apos;s converted to {"{{Shop_Name}}"}.</span>
-          </div>
-          <details className="small"><summary>Variables (filled from the project&apos;s Data Collection)</summary>
-            <table className="t small"><tbody>{lib.variables.map(([k, d]) => <tr key={k}><td style={{ width: 200 }}><code>{`{{${k}}}`}</code></td><td>{d}</td></tr>)}</tbody></table>
-          </details>
-          {msg && <div className="alert">{msg}</div>}{err && <div className="alert error">{err}</div>}
-          <RulesBox lib={lib} setLib={setLib} k={ruleKey} title={`General rules — ${ruleKey === "faq" ? "FAQ (both versions)" : info?.label || cat}`}
-            help="Sent together with the prompt above in the same AI request, so the first answer already follows them (no need to Revise afterwards). One rule per line." />
-          <RulesBox lib={lib} setLib={setLib} k="all" title="General rules — every prompt (Location, FAQ, Meta, Services, URL Redirects)"
-            help="Added to all of these prompts. The Homepage prompts have their own rules box on the Homepage tab." />
-        </div>
-      )}
-    </div>
-  );
-}
-
-/** One "General rules" box (saved separately from the prompt; "" = no rules). */
-function RulesBox({ lib, setLib, k, title, help }: { lib: PromptLib; setLib: (l: PromptLib) => void; k: string; title: string; help: string }) {
-  const saved = lib.rules?.[k] || "";
-  const [t, setT] = useState(saved);
-  const [msg, setMsg] = useState(""); const [err, setErr] = useState("");
-  useEffect(() => { setT(saved); setMsg(""); }, [saved, k]);
-  const save = async () => {
-    setErr(""); setMsg("");
-    try { const r = await api<PromptLib>("/api/settings/prompts", { method: "PUT", body: { rules: k, text: t } }); setLib(r); setMsg(t.trim() ? "Rules saved." : "Rules cleared."); }
-    catch (e) { setErr((e as Error).message); }
-  };
-  return (
-    <div className="card stack" style={{ boxShadow: "none", gap: 6 }}>
-      <b>{title}</b>
-      <span className="muted small">{help}</span>
-      <textarea rows={Math.min(12, Math.max(4, t.split("\n").length + 1))} value={t} onChange={(e) => setT(e.target.value)}
-        placeholder={"e.g.\nNever use the words \"top-notch\" or \"nestled\".\nWrite in a friendly, local tone.\nAlways write the city as City, ST."} />
-      <div className="row">
-        <button className="primary sm" disabled={t.trim() === saved.trim()} onClick={save}>Save rules</button>
-        {msg && <span className="muted small">{msg}</span>}
-      </div>
-      {err && <div className="alert error">{err}</div>}
-    </div>
-  );
-}
-
 function HomepagePrompts() {
   const [lib, setLib] = useState<HpLib | null>(null);
   const [err, setErr] = useState(""); const [msg, setMsg] = useState("");
@@ -478,42 +358,25 @@ function HomepagePrompts() {
   const importFile = async (file: File) => {
     setErr(""); setMsg("Importing…");
     try {
+      if (!/\.xlsx$/i.test(file.name)) throw new Error("Choose the guidelines .xlsx file");
       if (file.size > 60 * 1024 * 1024) throw new Error("That file is over 60 MB");
-      let rows: string[][];
-      if (/\.xlsx$/i.test(file.name)) {
-        // read the workbook here in the browser and send only the "My homepage prompt" sheet (uploads are capped at 4.5 MB)
-        const { readXlsx } = await import("@/lib/xlsx");
-        const sheet = readXlsx(new Uint8Array(await file.arrayBuffer())).find((x) => /homepage prompt/i.test(x.name));
-        if (!sheet) throw new Error('No "My homepage prompt" sheet in that file');
-        rows = sheet.rows.filter((r) => r.some((c) => c.trim())).map((r) => r.slice(0, 5)); // B = template, C = prompt, E1 = rules
-      } else if (/\.(txt|tsv|csv)$/i.test(file.name)) {
-        // text copied out of the sheet: template name, then the prompt (tab- or comma-separated) → same shape as the sheet (B, C)
-        const { parseDelimited } = await import("@/lib/tsv");
-        const text = await file.text();
-        const delim = text.split("\n", 1)[0].includes("\t") ? "\t" : ",";
-        rows = parseDelimited(text, delim).filter((r) => r.length >= 2).map((r) => ["", r[0], r[1]]);
-      } else throw new Error("Choose the guidelines .xlsx, or a .txt / .tsv copy of the prompts");
-      const r = await api<HpLib>("/api/settings/homepage-prompts/import", { body: { rows: rows.slice(0, 5000).map((x) => x.map((c) => c.slice(0, 40000))) } });
-      setLib(r); setMsg(`Imported ${r.prompts.length} template prompts (formatting tidied: quotes, labels, separators, section numbers).`);
+      // read the workbook here in the browser and send only the "My homepage prompt" sheet (uploads are capped at 4.5 MB)
+      const { readXlsx } = await import("@/lib/xlsx");
+      const sheet = readXlsx(new Uint8Array(await file.arrayBuffer())).find((x) => /homepage prompt/i.test(x.name));
+      if (!sheet) throw new Error('No "My homepage prompt" sheet in that file');
+      const rows = sheet.rows.filter((r) => r.some((c) => c.trim())).map((r) => r.slice(0, 5)); // B = template, C = prompt, E1 = rules
+      const r = await api<HpLib>("/api/settings/homepage-prompts/import", { body: { rows } });
+      setLib(r); setMsg(`Imported ${r.prompts.length} template prompts.`);
     }
-    catch (e) { setErr((e as Error).message); setMsg(""); }
-  };
-  const loadBuiltin = async () => {
-    if (lib.prompts.length && !confirm("Replace the current list with the 68 built-in template prompts? Your global rules are kept.")) return;
-    setErr(""); setMsg("Loading…");
-    try { const r = await api<HpLib>("/api/settings/homepage-prompts/import", { body: { builtin: true } }); setLib(r); setMsg(`Loaded ${r.prompts.length} built-in template prompts.`); }
     catch (e) { setErr((e as Error).message); setMsg(""); }
   };
   const shown = lib.prompts.filter((p) => !q || p.name.toLowerCase().includes(q.toLowerCase()));
   return (
     <div className="stack" style={{ maxWidth: 900 }}>
-      <p className="muted small" style={{ margin: 0 }}>Each project&apos;s <b>Prompts → Homepage</b> tab uses the prompt that matches its template (e.g. “HP Only - Single Location 16”, “Single Location Template 31”, “MSO Single Location 14”). Import them from your guidelines workbook (sheet <b>My homepage prompt</b>: column B = template, column C = prompt){lib.importedAt ? ` — last imported ${ago(lib.importedAt)}` : ""}.</p>
-      <div className="row" style={{ alignItems: "stretch" }}>
-        <label className="dropzone small" style={{ flex: 1 }}><b>Import prompts</b><div>guidelines .xlsx, or a .txt / .tsv copy (template name, tab, prompt) — replaces the list below</div>
-          <input type="file" hidden accept=".xlsx,.txt,.tsv,.csv" onChange={(e) => { const f = e.target.files?.[0]; if (f) importFile(f); e.target.value = ""; }} />
-        </label>
-        <button className="sm" onClick={loadBuiltin} title="The team's prompts shipped with the app (Oct 2026 export, cleaned)">Use the 68 built-in prompts</button>
-      </div>
+      <p className="muted small" style={{ margin: 0 }}>Each project&apos;s <b>Homepage</b> tab uses the prompt that matches its template (e.g. “HP Only - Single Location 16”, “Single Location Template 31”, “MSO Single Location 14”). Import them from your guidelines workbook (sheet <b>My homepage prompt</b>: column B = template, column C = prompt){lib.importedAt ? ` — last imported ${ago(lib.importedAt)}` : ""}.</p>
+      <label className="dropzone small"><b>Import from the guidelines .xlsx</b><div>replaces the list below</div>
+        <input type="file" hidden accept=".xlsx" onChange={(e) => { const f = e.target.files?.[0]; if (f) importFile(f); e.target.value = ""; }} />
+      </label>
       <label className="field"><span>Rules added to every prompt</span>
         <textarea rows={5} value={lib.rules} onChange={(e) => setLib({ ...lib, rules: e.target.value })} onBlur={() => save(lib)} />
       </label>

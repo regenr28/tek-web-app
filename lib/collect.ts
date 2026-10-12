@@ -77,17 +77,6 @@ export type Collection = {
 
 export const INSPECTION_STATES = ["TX", "HI", "VA", "MD", "MA", "WV", "VT", "NC", "NH", "LA"];
 export const STATES = new Set("AL AK AZ AR CA CO CT DE DC FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS MO MT NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY PR".split(" "));
-/** US states + Canadian provinces/territories: code → full name. */
-export const US_STATE_NAMES: Record<string, string> = { AL: "Alabama", AK: "Alaska", AZ: "Arizona", AR: "Arkansas", CA: "California", CO: "Colorado", CT: "Connecticut", DE: "Delaware", DC: "District of Columbia", FL: "Florida", GA: "Georgia", HI: "Hawaii", ID: "Idaho", IL: "Illinois", IN: "Indiana", IA: "Iowa", KS: "Kansas", KY: "Kentucky", LA: "Louisiana", ME: "Maine", MD: "Maryland", MA: "Massachusetts", MI: "Michigan", MN: "Minnesota", MS: "Mississippi", MO: "Missouri", MT: "Montana", NE: "Nebraska", NV: "Nevada", NH: "New Hampshire", NJ: "New Jersey", NM: "New Mexico", NY: "New York", NC: "North Carolina", ND: "North Dakota", OH: "Ohio", OK: "Oklahoma", OR: "Oregon", PA: "Pennsylvania", RI: "Rhode Island", SC: "South Carolina", SD: "South Dakota", TN: "Tennessee", TX: "Texas", UT: "Utah", VT: "Vermont", VA: "Virginia", WA: "Washington", WV: "West Virginia", WI: "Wisconsin", WY: "Wyoming", PR: "Puerto Rico" };
-export const PROVINCE_NAMES: Record<string, string> = { AB: "Alberta", BC: "British Columbia", MB: "Manitoba", NB: "New Brunswick", NL: "Newfoundland and Labrador", NS: "Nova Scotia", NT: "Northwest Territories", NU: "Nunavut", ON: "Ontario", PE: "Prince Edward Island", QC: "Quebec", SK: "Saskatchewan", YT: "Yukon" };
-export const REGION_NAMES: Record<string, string> = { ...US_STATE_NAMES, ...PROVINCE_NAMES };
-export const isProvince = (code: string) => !!PROVINCE_NAMES[code.toUpperCase()];
-/** Canadian area codes by province (they share the +1 numbering plan with the US). */
-const CA_AREA_CODES: Record<string, string[]> = {
-  AB: ["368", "403", "587", "780", "825"], BC: ["236", "250", "257", "604", "672", "778"], MB: ["204", "431", "584"], NB: ["428", "506"],
-  NL: ["709", "879"], NS: ["782", "902"], PE: ["782", "902"], ON: ["226", "249", "289", "343", "365", "382", "387", "416", "437", "519", "548", "613", "647", "683", "705", "742", "753", "807", "905", "942"],
-  QC: ["263", "354", "367", "418", "438", "450", "468", "514", "579", "581", "819", "873"], SK: ["306", "474", "639"], NT: ["867"], NU: ["867"], YT: ["867"],
-};
 
 const F = (value = "", source: Source = "", status: Status = value ? "ok" : "missing", note = ""): CField => ({ value, note, source, status });
 
@@ -134,13 +123,12 @@ export function formatPhone(raw: string) {
 
 export function checkPhone(raw: string, state: string): { value: string; ok: boolean; note: string } {
   const d = raw.replace(/\D/g, "").replace(/^1(?=\d{10}$)/, "");
-  if (d.length !== 10) return { value: raw.trim(), ok: false, note: `Phone "${raw}" isn't a 10-digit US/Canada number.` };
+  if (d.length !== 10) return { value: raw.trim(), ok: false, note: `Phone "${raw}" isn't a 10-digit US number.` };
   const ac = d.slice(0, 3);
   if (/^[01]/.test(ac) || /^[01]/.test(d.slice(3))) return { value: formatPhone(d), ok: false, note: "Phone number format is invalid (area code / exchange can't start with 0 or 1)." };
   const map = areaCodes as Record<string, string | string[]>;
-  const ca = Object.entries(CA_AREA_CODES).filter(([, codes]) => codes.includes(ac)).map(([p]) => p);
-  const st = map[ac] || (ca.length ? ca : undefined);
-  if (!st) return { value: formatPhone(d), ok: false, note: `Area code ${ac} isn't a known US or Canadian area code — double-check the number.` };
+  const st = map[ac];
+  if (!st) return { value: formatPhone(d), ok: false, note: `Area code ${ac} isn't a known US area code — double-check the number.` };
   const states = Array.isArray(st) ? st : [st];
   if (state && !states.includes(state)) return { value: formatPhone(d), ok: false, note: `Area code ${ac} belongs to ${states.join("/")}, but the shop is in ${state}. Could be a cell/VoIP number — please verify.` };
   return { value: formatPhone(d), ok: true, note: "" };
@@ -148,32 +136,11 @@ export function checkPhone(raw: string, state: string): { value: string; ok: boo
 
 const SUFFIX = /\b(st|street|rd|road|ave|avenue|blvd|boulevard|dr|drive|ln|lane|way|hwy|highway|pkwy|parkway|ct|court|pl|place|cir|circle|trl|trail|ter|terrace|pike|loop|sq|square|row|run|pass|expy|fwy|plaza|suite|ste|unit|#\s?\w+)\.?$/i;
 
-const reEsc = (x: string) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-/** State/province as a 2-letter code ("TX", "NS") or full name ("Texas", "Nova Scotia"). */
-const REGION = new RegExp(`(${[...Object.keys(REGION_NAMES), ...Object.values(REGION_NAMES).sort((a, b) => b.length - a.length).map((n) => reEsc(n).replace(/ /g, "\\s+"))].join("|")})`);
-/** US ZIP (12345 / 12345-6789) or Canadian postal code (B2H 5C5 / B2H5C5). */
-const POSTAL = "(\\d{5}(?:-\\d{4})?|[A-Za-z]\\d[A-Za-z]\\s?\\d[A-Za-z]\\d)";
-const ADDR_TAIL = new RegExp(`^([\\s\\S]*?)[,\\s]+${REGION.source}\\.?,?\\s*${POSTAL}?\\s*$`, "i");
-/** Does this line end like an address ("…, MO 65270", "…Nova Scotia B2H5C5")? */
-export const endsLikeAddress = (s: string) => new RegExp(`\\b${REGION.source}\\.?,?\\s*${POSTAL}\\s*$`, "i").test(s);
-const regionCode = (r: string) => {
-  const t = r.replace(/\s+/g, " ").trim();
-  if (REGION_NAMES[t.toUpperCase()] && t.length === 2) return t.toUpperCase();
-  return Object.entries(REGION_NAMES).find(([, n]) => n.toLowerCase() === t.toLowerCase())?.[0] || "";
-};
-
-/**
- * "11183 Trails End Rd. Truckee, CA 96161" → { city: "Truckee", state: "CA", zip: "96161" }
- * "554 Maclellans Brook Road Plymouth Nova Scotia B2H5C5" → { city: "Plymouth", state: "NS", zip: "B2H 5C5" }
- */
+/** "11183 Trails End Rd. Truckee, CA 96161" → { city: "Truckee", state: "CA", zip: "96161" } */
 export function parseCityState(address: string): { city: string; state: string; zip: string } {
-  const a = stripCountry(address.trim());
-  const m = a.match(ADDR_TAIL);
-  if (!m) return { city: "", state: "", zip: "" };
-  const state = regionCode(m[2]);
-  // a 2-letter code in lower/mixed case ("Wi") only counts when a ZIP/postal code follows ("in" / "or" aren't states)
-  if (!state || (m[2].trim().length === 2 && m[2].trim() !== state && !m[3])) return { city: "", state: "", zip: "" };
-  const zip = (m[3] || "").toUpperCase().replace(/^([A-Z]\d[A-Z])\s?(\d[A-Z]\d)$/, "$1 $2");
+  const a = address.replace(/,?\s*(USA|United States)\.?$/i, "").trim();
+  const m = a.match(/^(.*?)[,\s]+([A-Z]{2})\.?\s*(\d{5})?(?:-\d{4})?\s*$/);
+  if (!m || !STATES.has(m[2])) return { city: "", state: "", zip: "" };
   const before = m[1].trim();
   let city = before.includes(",") ? before.split(",").pop()!.trim() : "";
   if (!city) {
@@ -183,7 +150,7 @@ export function parseCityState(address: string): { city: string; state: string; 
       if (SUFFIX.test(words.slice(0, i).join(" "))) { city = words.slice(i).join(" "); break; }
     }
   }
-  return { city: city.replace(/^\d+\s+/, ""), state, zip };
+  return { city: city.replace(/^\d+\s+/, ""), state: m[2], zip: m[3] || "" };
 }
 
 /**
@@ -197,7 +164,7 @@ export function parseAddresses(raw: string): string[] {
   for (const l of lines) {
     for (const part of l.split(/\s*;\s*|\s+\|\s+/)) {
       cur.push(part);
-      if (endsLikeAddress(part)) { out.push(cur.join(", ").replace(/,\s*,/g, ",").replace(/\s+,/g, ",")); cur = []; }
+      if (/\b[A-Z]{2}\.?\s*\d{5}(-\d{4})?\s*$/.test(part)) { out.push(cur.join(", ").replace(/,\s*,/g, ",").replace(/\s+,/g, ",")); cur = []; }
     }
   }
   if (cur.length) out.push(cur.join(", "));
@@ -217,7 +184,48 @@ export function newLocation(): Loc {
   return { city: "", state: "", tekmetricId: "", fields: Object.fromEntries(LOC_FIELDS.map((f) => [f.key, F()])) as Record<LocKey, CField> };
 }
 
-export const stripCountry = (a: string) => a.replace(/,?\s*(USA|U\.S\.A|United States( of America)?|US|Canada)\.?\s*$/i, "").trim();
+export const stripCountry = (a: string) => a.replace(/,?\s*(USA|United States|US)\.?$/i, "").trim();
+
+// ---------- Jira answers that are instructions, not content ----------
+
+const SITE_IN_TEXT = /\b((?:https?:\/\/)?(?:www\.)?[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*\.(?:com|net|org|biz|us|info|co|auto|shop|repair|site|website)\b(?:\/[^\s,;)]*)?)/i;
+/**
+ * "take from old website 1ssrepair.com", "use our Facebook about section", "see our current site" —
+ * the client is telling us where to get the text, not giving it. Returns the site they point to (if any).
+ */
+export function jiraInstruction(text: string): { site: string; quote: string } | null {
+  const t = (text || "").trim();
+  if (!t || t.length > 300) return null;
+  const site = t.match(SITE_IN_TEXT)?.[1] || "";
+  const verb = /^\s*(?:please\s+)?(?:take|use|get|pull|copy|grab|see|refer to|same as|check|look at|from)\b/i.test(t);
+  const pointer = /\b(?:from|on|in|at)\s+(?:our|the|my|their)?\s*(?:old|current|existing|previous|former)?\s*(?:web\s?site|site|page|facebook|fb|google|gbp|yelp|instagram)\b/i.test(t);
+  const onlySite = !!site && t.replace(site, "").replace(/[\s.,;:-]/g, "").length === 0;
+  const shortSiteRef = !!site && t.length <= 60 && /\b(?:old|current|existing|previous|former|web\s?site|site)\b/i.test(t); // "old website x.com"
+  if (!(verb && (site || pointer)) && !onlySite && !shortSiteRef) return null;
+  return { site: site ? websiteUrl(site) : "", quote: t };
+}
+
+/**
+ * Applies those instructions to the collection (idempotent; person-edited fields are left alone):
+ * the instruction is never used as the content, and a site the client points to becomes the website to read.
+ */
+export function applyJiraInstructions(c: Collection, raw: { about?: string; coupons?: string; faq?: string }) {
+  const label: Record<string, string> = { about: "About Us", coupons: "Coupons", faq: "FAQ" };
+  for (const k of ["about", "coupons", "faq"] as const) {
+    const ins = jiraInstruction(raw[k] || "");
+    const f = c.fields[k];
+    if (!ins || f.manual) continue;
+    if (f.value.trim() === ins.quote || (f.source === "jira" && f.value.trim() === (raw[k] || "").trim())) { f.value = ""; f.source = ""; }
+    const line = `The client wrote “${ins.quote}” in Jira's ${label[k]} — that's an instruction, not the text to use.${ins.site ? ` Their site ${domainOf(ins.site).replace(/^www\./, "")} is read in the website step.` : ""}`;
+    if (!f.note.includes(line)) f.note = joinNote(f.note.split("\n").filter((l) => !/^Jira About Us is the fact/.test(l)).join("\n"), line);
+    f.status = "review";
+    const w = c.fields.existingWebsite;
+    if (ins.site && !w.manual && (!w.value || w.source !== "jira")) {
+      w.value = ins.site; w.source = "jira"; w.status = "review";
+      w.note = `From the client's ${label[k]} answer in Jira: “${ins.quote}”.`;
+    }
+  }
+}
 
 export function websiteUrl(raw: string) {
   const s = raw.trim().split(/\s+/)[0];
@@ -317,6 +325,7 @@ export function fromJira(jira: JiraProject, f: JiraFields, opts: { minAmenities:
 
   set("about", F(about, "jira", about ? "ok" : "review", about ? "Jira About Us is the fact (dates/years win over other sources)." : "No About Us — research will look on their website/Facebook."));
   if (faq) set("faq", F(faq, "jira", "ok", /warrant/i.test(faq) && !warranty ? "FAQ mentions a warranty — check the Warranties field." : ""));
+  applyJiraInstructions(c, { about, faq, coupons });
 
   const amenities = uniqLines(splitLines(pick(f, /^Amenities$/i, /benefit/i)).map(titleCase));
   set("amenities", F(amenities.join("\n"), "jira", amenities.length >= c.minAmenities ? "ok" : "review",
@@ -373,20 +382,7 @@ export function fromJira(jira: JiraProject, f: JiraFields, opts: { minAmenities:
 }
 
 /** Rules that must hold no matter where values came from. Re-run after every research step. */
-/** City, State left empty (e.g. projects imported before Canadian addresses were understood): fill it from the address. */
-export function fillCityState(c: Collection) {
-  const f = c.fields.cityState;
-  if (f.value.trim() || f.manual || c.locations.length) return;
-  const loc = parseCityState(c.fields.address.value);
-  if (!loc.city || !loc.state) return;
-  f.value = `${loc.city}, ${loc.state}`;
-  f.source = c.fields.address.source === "gbp" ? "gbp" : "rule";
-  f.status = "review";
-  f.note = [f.note.split("\n").filter((l) => !/missing city and state/i.test(l)).join("\n"), `Taken from the address (${c.fields.address.value}).`].filter(Boolean).join("\n");
-}
-
 export function applyRules(c: Collection) {
-  fillCityState(c);
   const states = [...new Set([c.fields.cityState.value.match(/,\s*([A-Z]{2})\b/)?.[1] || "", ...c.locations.map((l) => l.state)].filter(Boolean))];
   const insp = states.filter((st) => INSPECTION_STATES.includes(st));
   const svc = splitLinesKeep(c.fields.services.value);

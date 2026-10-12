@@ -161,28 +161,6 @@ const SCHEMA = [
     ssl_expires TEXT
   )`,
   `CREATE INDEX IF NOT EXISTS websites_health ON websites(health)`,
-  // "What changed" feed for All Websites (went down, back up, new warnings)
-  `CREATE TABLE IF NOT EXISTS website_events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    website_id INTEGER NOT NULL,
-    at TEXT NOT NULL DEFAULT (datetime('now')),
-    kind TEXT NOT NULL,
-    health TEXT NOT NULL DEFAULT '',
-    title TEXT NOT NULL DEFAULT '',
-    detail TEXT NOT NULL DEFAULT ''
-  )`,
-  `CREATE INDEX IF NOT EXISTS website_events_at ON website_events (id DESC)`,
-  // Browser push subscriptions (each person turns alerts on in their own browser)
-  `CREATE TABLE IF NOT EXISTS push_subs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    endpoint TEXT NOT NULL UNIQUE,
-    p256dh TEXT NOT NULL,
-    auth TEXT NOT NULL,
-    label TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    last_ok_at TEXT
-  )`,
   `CREATE TABLE IF NOT EXISTS health_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     status TEXT NOT NULL DEFAULT 'queued',
@@ -201,7 +179,6 @@ const SCHEMA = [
 // Columns added after the first release. Each is applied once if missing.
 const COLUMNS: [table: string, column: string, ddl: string][] = [
   ["users", "mfa_enabled", "INTEGER NOT NULL DEFAULT 0"],
-  ["users", "can_history", "INTEGER NOT NULL DEFAULT 1"],
   ["users", "mfa_secret_enc", "TEXT"],
   ["users", "mfa_last_step", "INTEGER NOT NULL DEFAULT 0"],
   ["users", "recovery_codes", "TEXT"],
@@ -220,23 +197,6 @@ const COLUMNS: [table: string, column: string, ddl: string][] = [
   ["sites", "tekmetric_id", "TEXT"],
   ["sessions", "remember", "INTEGER NOT NULL DEFAULT 0"],
   ["sites", "homepage_json", "TEXT"],
-  // What a member may open: all | projects | websites (Super Admins always see everything)
-  ["users", "access", "TEXT NOT NULL DEFAULT 'all'"],
-  // Location / FAQ / Meta / Service pages / URL redirects generated from the Prompts tab
-  ["sites", "prompts_json", "TEXT"],
-  // All Websites monitoring: uptime history, incidents, GBP website check
-  ["websites", "uptime_json", "TEXT"],
-  ["websites", "incidents_json", "TEXT"],
-  ["websites", "gbp_json", "TEXT"],
-  ["websites", "gbp_checked_at", "TEXT"],
-  // small summary of uptime_json/incidents_json for the list (the full history is only read for one site)
-  ["websites", "uptime_pct", "REAL"],
-  ["websites", "uptime_checks", "INTEGER NOT NULL DEFAULT 0"],
-  ["websites", "uptime_recent", "TEXT NOT NULL DEFAULT ''"],
-  ["websites", "open_incident", "TEXT"],
-  // site history chart: when a site that had been live stopped being published / left Duda's export (seen on import)
-  ["websites", "unpublished_at", "TEXT"],
-  ["websites", "removed_at", "TEXT"],
 ];
 
 async function migrate() {

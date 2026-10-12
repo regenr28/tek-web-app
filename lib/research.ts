@@ -62,6 +62,21 @@ export function nameSimilarity(a: string, b: string) {
   return inter / Math.max(x.size, y.size);
 }
 const LEGAL = /\b(l\.?l\.?c|inc|incorporated|corp|corporation|co|ltd|pllc|llp|lp)\b\.?/gi;
+const reEscName = (x: string) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/**
+ * Is the shop's full name in this text / URL? Works for short or initial names that word-matching can't handle:
+ * "S&S Repair Center" matches "S&S Repair Center", "S and S Repair Center" and the handle "SSRepairCenter",
+ * but not "Bess Repair Center".
+ */
+export function nameIn(name: string, text: string) {
+  const parts = name.replace(LEGAL, " ").toLowerCase().match(/[a-z0-9]+|&/g) || [];
+  if (!parts.filter((p) => p !== "&").join("").length) return false;
+  let t = text; try { t = decodeURIComponent(text); } catch { /* keep */ }
+  const pat = parts.map((p) => (p === "&" ? "(?:&|and|n)?" : reEscName(p))).join("[^a-z0-9]*");
+  return new RegExp(`(?:^|[^a-z0-9])${pat}`).test(t.toLowerCase().replace(/&amp;/g, "&"));
+}
+/** The distinctive words of a name (without auto/repair/center/LLC…). Empty for names like "S&S Repair Center". */
+const coreWords = (name: string) => norm(name).split(" ").filter((t) => t.length > 2);
 const nameKey = (x: string) => x.toLowerCase().replace(/&/g, " and ").replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
 /** How another listing's name compares with the Jira name. */
 export function compareNames(jira: string, other: string): "same" | "legal" | "minor" | "different" {
@@ -441,7 +456,7 @@ async function gbpFromWebsite(c: Collection, ev: Evidence): Promise<SiteGbp[]> {
 
 /** Picks the website GBP that belongs to this shop (or this MSO location). */
 function pickSiteGbp(found: SiteGbp[], shopName: string, loc?: { city: string; address: string }, many = false): { cid: string; placeId: string; title: string; from: string; fid?: string } | null {
-  let list = found.filter((g) => !g.title || nameSimilarity(shopName, g.title) >= 0.4 || norm(g.title).includes(norm(shopName).split(" ")[0] || "~"));
+  let list = found.filter((g) => !g.title || nameSimilarity(shopName, g.title) >= 0.4 || nameIn(shopName, g.title));
   if (loc) {
     const city = loc.city.toLowerCase().replace(/[^a-z]/g, ""), num = loc.address.match(/^\d+/)?.[0] || "~", zip = loc.address.match(/\d{5}/)?.[0] || "~";
     const hit = list.filter((g) => { const t = `${g.title} ${g.context}`.toLowerCase(); return (city.length > 2 && t.replace(/[^a-z]/g, "").includes(city)) || t.includes(num) || t.includes(zip); });
@@ -507,7 +522,7 @@ export const NOT_SHOP_SITE = /(^|\.)(mobil|exxon|exxonmobil|esso|shell|chevron|t
 /** Does a website really belong to this shop? Proof = their phone or street address on it, or their name plus their ZIP/city. */
 function siteProof(c: Collection, text: string, title: string) {
   const name = c.fields.shopName.value;
-  const nameHit = !!name && (nameSimilarity(name, title) >= 0.5 || norm(text).includes(norm(name)));
+  const nameHit = !!name && (nameIn(name, `${title} ${text}`) || (coreWords(name).length > 0 && nameSimilarity(name, title) >= 0.5));
   let best: string[] = [];
   for (const L of locInfos(c)) { const m = matchSignals(text, L); if (m.strong.length > best.length) best = m.strong; }
   const hard = best.filter((x) => /phone|street/.test(x));
@@ -591,7 +606,10 @@ export async function stepWebsite(c: Collection, ev: Evidence, raw: Record<strin
   if (w.value && !trusted) { w.value = ""; w.source = ""; } // an earlier run filled it from GBP without checking — re-decide below
   const gbpSites = uniqLines([ev.gbp?.place?.website || "", ...(ev.gbpLocs || []).map((g) => g.place?.website || "")].filter(Boolean).map((u) => (/^https?:\/\//i.test(u.trim()) ? u.trim() : websiteUrl(u))).filter(Boolean))
     .filter((u) => !trusted || host(u) !== host(trusted));
-  const cands = [...(trusted ? [{ url: trusted, from: "jira" as const }] : []), ...gbpSites.map((url) => ({ url, from: "gbp" as const }))];
+  // sites the client named in an answer ("take from old website x.com") are theirs too
+  const named = (["about", "coupons", "faq"] as const).map((k) => jiraInstruction(raw[k] || "")?.site || "").filter((u) => u && (!trusted || host(u) !== host(trusted)));
+  const jiraSites = uniqLines([...(trusted ? [trusted] : []), ...named]);
+  const cands = [...jiraSites.map((url) => ({ url, from: "jira" as const })), ...gbpSites.filter((u) => !jiraSites.some((j) => host(j) === host(u))).map((url) => ({ url, from: "gbp" as const }))];
   const jiraSays = raw.hasWebsite ? `Jira's answer: "${raw.hasWebsite}"` : "No website given in Jira";
   const notes: string[] = [];
   const aboutIns = jiraInstruction(raw.about || "");
@@ -629,7 +647,7 @@ export async function stepWebsite(c: Collection, ev: Evidence, raw: Record<strin
 
   if (!used) {
     ev.website = undefined; clearWebsiteFinds();
-    if (!trusted && !w.manual) { w.value = ""; w.source = ""; w.status = "missing"; }
+    if (!trusted && !w.manual) { w.value = named[0] || ""; w.source = named[0] ? "jira" : ""; w.status = named[0] ? "review" : "missing"; }
     w.note = [!trusted ? `${jiraSays}.` : "", ...notes].filter(Boolean).join("\n");
     if (w.note && !w.manual) w.status = trusted ? "review" : notes.length ? "review" : "missing";
     composeSocials(c, ev);
@@ -656,7 +674,7 @@ export async function stepWebsite(c: Collection, ev: Evidence, raw: Record<strin
   // Domain decision when Jira didn't give one — only from a site proven to be theirs
   if (owned && (!c.fields.domain.value || c.fields.domain.source !== "jira")) {
     const d = domainOf(read.home.url);
-    const fits = nameSimilarity(c.fields.shopName.value, d.replace(/^www\./, "").replace(/\.[a-z]+$/, "").replace(/-/g, " ")) >= 0.5 || norm(d).replace(/ /g, "").includes(norm(c.fields.shopName.value).replace(/ /g, "").slice(0, 8));
+    const fits = nameIn(c.fields.shopName.value, d.replace(/^www\./, "")) || nameSimilarity(c.fields.shopName.value, d.replace(/^www\./, "").replace(/\.[a-z]+$/, "").replace(/-/g, " ")) >= 0.5 || norm(d).replace(/ /g, "").includes(norm(c.fields.shopName.value).replace(/ /g, "").slice(0, 8));
     patch(c, "domain", { value: d, source: "website", status: fits ? "ok" : "review",
       note: fits ? `Decision: using their current domain ${d} (matches the shop name).` : `Decision needed: current domain ${d} doesn't clearly match "${c.fields.shopName.value}" — confirm with the client before using it.` });
   }
@@ -952,9 +970,11 @@ export async function stepSearch(c: Collection, ev: Evidence): Promise<string> {
     ev.search = { queries, provider, results: results.slice(0, 40), at: now() };
   }
 
-  const nameTok = norm(name).split(" ").filter((t) => t.length > 2);
+  const nameTok = coreWords(name);
   const relevant = (r: WebResult) => {
-    const hay = norm(`${r.title} ${r.snippet} ${decodeURIComponent(r.url)}`);
+    if (nameIn(name, `${r.title} ${r.snippet} ${r.url}`)) return true; // full name, incl. handles like /SSRepairCenter
+    let url = r.url; try { url = decodeURIComponent(r.url); } catch { /* keep */ }
+    const hay = norm(`${r.title} ${r.snippet} ${url}`);
     return nameTok.length ? nameTok.filter((t) => hay.includes(t)).length / nameTok.length >= 0.6 : false;
   };
   const candidates = results.filter((r) => platformOf(r.url) && profileOf(r.url) && relevant(r) && !GENERIC_SOCIAL.test(new URL(r.url).pathname));
@@ -965,10 +985,10 @@ export async function stepSearch(c: Collection, ev: Evidence): Promise<string> {
     const v = verifyListing(c, r);
     // proof = their phone or street address, or a similar name plus their ZIP / city+state (a city alone fits any business there)
     const hard = v.strong.some((x) => /phone|street/.test(x));
-    const nameOk = nameSimilarity(c.fields.shopName.value, `${r.title} ${profileOf(r.url)?.clean || ""}`) >= 0.5;
+    const nameOk = nameIn(name, `${r.title} ${r.url}`) || (nameTok.length > 0 && nameSimilarity(name, `${r.title} ${profileOf(r.url)?.clean || ""}`) >= 0.5);
     if (hard || (v.strong.length && nameOk)) {
       accepted.push(r); locHint[r.url] = v.loc;
-      reasons[r.url] = `${r.ai ? "Groq AI search" : "web search"} result shows ${v.strong.join(", ")}${r.ai ? " — open it to double-check" : ""}`;
+      reasons[r.url] = `${r.ai ? "Groq AI search" : "web search"} result shows ${[...(nameOk ? [`the name "${name}"`] : []), ...v.strong].join(", ")}${r.ai ? " — open it to double-check" : ""}`;
     } else if (!unsure.some((x) => profileOf(x.r.url)!.key === profileOf(r.url)!.key)) unsure.push({ r, cityOnly: v.cityOnly });
   }
   // Second chance: open the page itself (or let Groq open it) and look for the address / phone

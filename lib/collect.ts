@@ -220,7 +220,7 @@ export function applyJiraInstructions(c: Collection, raw: { about?: string; coup
     if (!f.note.includes(line)) f.note = joinNote(f.note.split("\n").filter((l) => !/^Jira About Us is the fact/.test(l)).join("\n"), line);
     f.status = "review";
     const w = c.fields.existingWebsite;
-    if (ins.site && !w.manual && (!w.value || w.source !== "jira")) {
+    if (ins.site && !w.manual && !w.value) { // the website step also tries this site when another one is filled in
       w.value = ins.site; w.source = "jira"; w.status = "review";
       w.note = `From the client's ${label[k]} answer in Jira: “${ins.quote}”.`;
     }

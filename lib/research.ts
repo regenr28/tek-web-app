@@ -6,7 +6,7 @@ import { callAI, parseJson, groqBrowserSearch } from "./ai";
 import { hoursFromJira } from "./hours";
 import {
   type Collection, type FieldKey, type CField, type Source, FIELDS, LOC_FIELDS, PER_LOCATION, applyRules, joinNote, splitLinesKeep, uniqLines, titleCase,
-  parseCityState, stripCountry, checkPhone, domainOf, websiteUrl, certsMentioned, dropClosedDays, INSPECTION_STATES, jiraInstruction,
+  parseCityState, stripCountry, checkPhone, domainOf, websiteUrl, certsMentioned, dropClosedDays, INSPECTION_STATES, jiraInstruction, notAPhone, formatPhone,
 } from "./collect";
 
 /**
@@ -230,6 +230,9 @@ async function stepGbpSingle(c: Collection, ev: Evidence): Promise<string> {
 }
 
 /** Copies a matched GBP into the sheet (exported for tests). */
+/** The original Jira phone answer, kept in the field note when it wasn't a phone number. */
+function jiraPhoneRaw(c: Collection) { return c.fields.phone.note.match(/Jira's phone answer is "([^"]+)"/)?.[1] || (c.fields.phone.source === "jira" ? c.fields.phone.value : ""); }
+
 export function applyGbpPlace(c: Collection, place: Place) {
   const name = c.fields.shopName.value, jiraAddr = c.fields.address.value;
   // Name — Jira is the fact; just note a mismatch
@@ -262,8 +265,14 @@ export function applyGbpPlace(c: Collection, place: Place) {
   if (place.placeId) patch(c, "placeId", { value: place.placeId, source: "gbp", force: true, status: "ok" });
   else if (!c.fields.placeId.value) patch(c, "placeId", { note: "Place ID not found in the link — use Google's Place ID Finder: https://developers.google.com/maps/documentation/places/web-service/place-id", source: "gbp", status: "review" });
 
-  // Phone — Jira is the fact
-  if (place.phone && c.fields.phone.value && digits(place.phone) !== digits(c.fields.phone.value))
+  // Phone — Jira is the fact, unless Jira's answer isn't a phone number at all (then the GBP number is used)
+  const pf = c.fields.phone;
+  const jiraPhone = jiraPhoneRaw(c);
+  if (place.phone && !pf.manual && (!pf.value.trim() || notAPhone(pf.value)) && digits(place.phone).length >= 10) {
+    pf.value = formatPhone(digits(place.phone).slice(-10)); pf.source = "gbp"; pf.status = "review";
+    pf.note = `${jiraPhone && notAPhone(jiraPhone) ? `Jira's phone answer is "${jiraPhone}" — not a phone number. ` : "No phone in Jira. "}Used the GBP number ${pf.value} (GBP "${place.title}") — confirm with the client.`;
+  }
+  if (place.phone && c.fields.phone.value && pf.source !== "gbp" && digits(place.phone) !== digits(c.fields.phone.value))
     patch(c, "phone", { note: `GBP phone is ${place.phone} — kept the Jira number.`, source: "jira", status: "review" });
   if (c.fields.phone.value) {
     const st = c.fields.cityState.value.match(/,\s*([A-Z]{2})$/)?.[1] || "";
@@ -346,6 +355,7 @@ function applyGbpToLocation(c: Collection, i: number, place: Place) {
   // Phone — the client's number wins; just note the GBP one (their rule: one number → all locations)
   if (place.phone && lf.phone.value && digits(place.phone) !== digits(lf.phone.value))
     patchField(lf.phone, { note: `This location's GBP phone is ${place.phone}.`, source: "gbp", status: "review" });
+  if ((!lf.phone.value || notAPhone(lf.phone.value)) && !lf.phone.manual && place.phone) { lf.phone.value = ""; lf.phone.source = ""; }
   if (!lf.phone.value && place.phone) patchField(lf.phone, { value: place.phone, source: "gbp", status: "review", note: "No phone in Jira for this location — taken from its GBP." });
   if (/mobile/i.test(place.type)) patchField(lf.address, { note: `GBP category is "${place.type}".`, source: "gbp", status: "review" });
 }
@@ -935,17 +945,21 @@ export function searchQueries(c: Collection): string[] {
   const name = c.fields.shopName.value;
   const [city, st] = c.locations.length ? [c.locations[0].city, c.locations[0].state] : c.fields.cityState.value.split(",").map((s) => s.trim());
   const where = [city, st].filter(Boolean).join(" ");
-  const queries = [`"${name}" ${where}`];
+  // "A & J Automotive" is usually written "A&J Automotive" online — search every spelling
+  const amp = /&/.test(name) ? [...new Set([name, name.replace(/\s*&\s*/g, "&"), name.replace(/\s*&\s*/g, " and ")])] : [name];
+  const qn = amp.length > 1 ? `(${amp.map((n) => `"${n}"`).join(" OR ")})` : `"${name}"`;
+  const queries = [`${qn} ${where}`];
   if (c.locations.length) {
     for (const L of c.locations) if (splitLinesKeep(L.fields.socials.value).filter((u) => platformOf(u)).length < 3)
-      queries.push(`"${name}" ${L.city} ${L.state} facebook OR instagram OR yelp OR youtube OR tiktok`);
+      queries.push(`${qn} ${L.city} ${L.state} facebook OR instagram OR yelp OR youtube OR tiktok`);
   } else {
     const socialCount = splitLinesKeep(c.fields.socials.value).filter((u) => platformOf(u)).length;
-    if (socialCount < 4) queries.push(`"${name}" ${where} facebook OR instagram OR yelp OR youtube OR tiktok OR linkedin`);
+    if (socialCount < 4) queries.push(`${qn} ${where} facebook OR instagram OR yelp OR youtube OR tiktok OR linkedin`);
+    if (!splitLinesKeep(c.fields.socials.value).some((u) => platformOf(u) === "Facebook")) queries.push(`${qn} ${where} site:facebook.com`);
   }
   const needs = (["coupons", "warranties", "financing", "certifications"] as FieldKey[]).filter((k) => c.fields[k].status !== "ok");
-  if (needs.length) queries.push(`"${name}" ${where} coupon OR special OR warranty OR "NAPA AutoCare" OR financing OR ASE`);
-  if (!/\b(19|20)\d{2}\b|\byears\b/i.test(c.fields.about.value)) queries.push(`"${name}" ${where} established OR "years experience" OR "in business since" OR history`);
+  if (needs.length) queries.push(`${qn} ${where} coupon OR special OR warranty OR "NAPA AutoCare" OR financing OR ASE`);
+  if (!/\b(19|20)\d{2}\b|\byears\b/i.test(c.fields.about.value)) queries.push(`${qn} ${where} established OR "years experience" OR "in business since" OR history`);
   const site = c.fields.existingWebsite.value ? domainOf(websiteUrl(c.fields.existingWebsite.value) || c.fields.existingWebsite.value).replace(/^www\./, "") : "";
   if (site && /\./.test(site) && (!c.fields.warranties.value || c.fields.warranties.source !== "jira")) queries.push(`site:${site} warranty OR guarantee`);
   return queries;
@@ -1067,7 +1081,7 @@ function readListing(html: string): { name: string; phone: string; address: stri
 
 export async function stepCrossCheck(c: Collection, ev: Evidence, jiraRaw: Record<string, string>): Promise<string> {
   const jName = c.fields.shopName.value;
-  const jPhone = digits(jiraRaw.phone || c.fields.phone.value);
+  let jPhone = digits(jiraRaw.phone && !notAPhone(jiraRaw.phone) ? jiraRaw.phone : c.fields.phone.value);
   const locs = locInfos(c);
   const jAddr = jiraRaw.address || locs[0]?.address || "";
   const myDomain = domainOf(websiteUrl(c.fields.domain.value || c.fields.existingWebsite.value || "") || "").replace(/^www\./, "");
@@ -1117,6 +1131,17 @@ Return ONLY JSON: {"pages":[{"url":"","opened":true,"name":"","phone":"","addres
     } catch { /* no Groq */ }
   }
 
+  // Jira's phone answer wasn't a phone number and no GBP number was found: use the number the confirmed listings agree on
+  const pf = c.fields.phone;
+  if (!c.locations.length && !pf.manual && (!pf.value.trim() || notAPhone(pf.value))) {
+    const seen = new Map<string, string[]>();
+    for (const r of rows.slice(1)) { const d = digits(r.phone).slice(-10); if (d.length === 10 && r.read !== "none") seen.set(d, [...(seen.get(d) || []), r.source]); }
+    if (seen.size === 1) {
+      const [[d, srcs]] = [...seen.entries()];
+      pf.value = fmtPhone(d); pf.source = "search"; pf.status = "review"; jPhone = d; rows[0].phone = pf.value;
+      pf.note = joinNote(pf.note.split("\n").filter((l) => !/^Used the|^Listings differ/.test(l)).join("\n"), `Used the number shown on ${srcs.join(", ")} — confirm with the client.`);
+    } else if (seen.size > 1) patch(c, "phone", { note: `Listings show different numbers: ${[...seen.entries()].map(([d, sr]) => `${fmtPhone(d)} (${sr.join(", ")})`).join(" · ")} — ask the client.`, source: "search", status: "review" });
+  }
   // compare everything with Jira
   const issues: string[] = [];
   const num = (a: string) => a.match(/^\s*(\d+)/)?.[1] || "";
@@ -1147,6 +1172,8 @@ Return ONLY JSON: {"pages":[{"url":"","opened":true,"name":"","phone":"","addres
     }
   }
   ev.crosscheck = { at: now(), rows, issues };
+
+
 
   // put each discrepancy on the field it affects
   const put = (k: FieldKey, prefix: string, lines: string[]) => {

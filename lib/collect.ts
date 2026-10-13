@@ -121,6 +121,11 @@ export function formatPhone(raw: string) {
   return d.length === 10 ? `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}` : raw.trim();
 }
 
+/** Jira's phone answer holds no phone number at all (e.g. the client typed their email there). */
+export const notAPhone = (raw: string) => !!raw.trim() && raw.replace(/\D/g, "").replace(/^1(?=\d{10}$)/, "").length < 10;
+export const notAPhoneNote = (raw: string) =>
+  `Jira's phone answer is "${raw.trim()}" — ${/@/.test(raw) ? "that's an email, " : ""}not a phone number. Research fills this from their GBP (or a confirmed listing like Facebook) — confirm with the client.`;
+
 export function checkPhone(raw: string, state: string): { value: string; ok: boolean; note: string } {
   const d = raw.replace(/\D/g, "").replace(/^1(?=\d{10}$)/, "");
   if (d.length !== 10) return { value: raw.trim(), ok: false, note: `Phone "${raw}" isn't a 10-digit US number.` };
@@ -137,8 +142,11 @@ export function checkPhone(raw: string, state: string): { value: string; ok: boo
 const SUFFIX = /\b(st|street|rd|road|ave|avenue|blvd|boulevard|dr|drive|ln|lane|way|hwy|highway|pkwy|parkway|ct|court|pl|place|cir|circle|trl|trail|ter|terrace|pike|loop|sq|square|row|run|pass|expy|fwy|plaza|suite|ste|unit|#\s?\w+)\.?$/i;
 
 /** "11183 Trails End Rd. Truckee, CA 96161" → { city: "Truckee", state: "CA", zip: "96161" } */
+export const STATE_CODE: Record<string, string> = { alabama: "AL", alaska: "AK", arizona: "AZ", arkansas: "AR", california: "CA", colorado: "CO", connecticut: "CT", delaware: "DE", "district of columbia": "DC", florida: "FL", georgia: "GA", hawaii: "HI", idaho: "ID", illinois: "IL", indiana: "IN", iowa: "IA", kansas: "KS", kentucky: "KY", louisiana: "LA", maine: "ME", maryland: "MD", massachusetts: "MA", michigan: "MI", minnesota: "MN", mississippi: "MS", missouri: "MO", montana: "MT", nebraska: "NE", nevada: "NV", "new hampshire": "NH", "new jersey": "NJ", "new mexico": "NM", "new york": "NY", "north carolina": "NC", "north dakota": "ND", ohio: "OH", oklahoma: "OK", oregon: "OR", pennsylvania: "PA", "rhode island": "RI", "south carolina": "SC", "south dakota": "SD", tennessee: "TN", texas: "TX", utah: "UT", vermont: "VT", virginia: "VA", washington: "WA", "west virginia": "WV", wisconsin: "WI", wyoming: "WY", "puerto rico": "PR" };
+const STATE_NAME_END = new RegExp(`[,\\s]+(${Object.keys(STATE_CODE).sort((a, b) => b.length - a.length).join("|")})\\.?(\\s*\\d{5}(?:-\\d{4})?)?\\s*$`, "i");
 export function parseCityState(address: string): { city: string; state: string; zip: string } {
-  const a = address.replace(/,?\s*(USA|United States)\.?$/i, "").trim();
+  // "…Holland, Michigan 49424" → "…Holland, MI 49424"
+  const a = address.replace(/,?\s*(USA|United States)\.?$/i, "").trim().replace(STATE_NAME_END, (_m, st: string, zip = "") => `, ${STATE_CODE[st.toLowerCase()]}${zip}`);
   const m = a.match(/^(.*?)[,\s]+([A-Z]{2})\.?\s*(\d{5})?(?:-\d{4})?\s*$/);
   if (!m || !STATES.has(m[2])) return { city: "", state: "", zip: "" };
   const before = m[1].trim();
@@ -209,6 +217,17 @@ export function jiraInstruction(text: string): { site: string; quote: string } |
  * Applies those instructions to the collection (idempotent; person-edited fields are left alone):
  * the instruction is never used as the content, and a site the client points to becomes the website to read.
  */
+/** Fixes for projects imported before these rules existed (idempotent; person-edited fields are left alone). */
+export function repairJiraFields(c: Collection, raw: { address?: string; phone?: string }) {
+  const cs = c.fields.cityState;
+  if (!c.locations.length && !cs.value && !cs.manual && raw.address) {
+    const loc = parseCityState(raw.address);
+    if (loc.city && loc.state) { cs.value = `${loc.city}, ${loc.state}`; cs.source = "jira"; cs.status = "review"; }
+  }
+  const pf = c.fields.phone;
+  if (!c.locations.length && !pf.manual && raw.phone && notAPhone(raw.phone) && pf.source === "jira") { pf.value = ""; pf.source = ""; pf.status = "missing"; pf.note = notAPhoneNote(raw.phone); }
+}
+
 export function applyJiraInstructions(c: Collection, raw: { about?: string; coupons?: string; faq?: string }) {
   const label: Record<string, string> = { about: "About Us", coupons: "Coupons", faq: "FAQ" };
   for (const k of ["about", "coupons", "faq"] as const) {
@@ -269,7 +288,10 @@ export function fromJira(jira: JiraProject, f: JiraFields, opts: { minAmenities:
   set("cityState", F(loc.city && loc.state ? `${loc.city}, ${loc.state}` : "", "jira", loc.city ? "review" : "missing"));
 
   const phoneRaw = pick(f, /^Shop Phone Number$/i, /phone/i);
-  if (phoneRaw) { const p = checkPhone(phoneRaw, loc.state); set("phone", F(p.value, "jira", p.ok ? "ok" : "review", p.note)); }
+  if (phoneRaw) {
+    if (!notAPhone(phoneRaw)) { const p = checkPhone(phoneRaw, loc.state); set("phone", F(p.value, "jira", p.ok ? "ok" : "review", p.note)); }
+    else set("phone", F("", "", "missing", notAPhoneNote(phoneRaw)));
+  }
 
   const jobs = pick(f, /what email would you like to (use|receive).*job/i);
   const primary = pick(f, /^Primary Contact Email$/i, /company email/i);

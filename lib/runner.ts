@@ -2,7 +2,7 @@ import { timingSafeEqual } from "crypto";
 import { one, run } from "./db";
 import { sha256, randomToken } from "./secrets";
 import { loadProject, saveProject, jiraRaw } from "./projects";
-import { applyJiraInstructions } from "./collect";
+import { applyJiraInstructions, repairJiraFields } from "./collect";
 import { STEPS, stepGbp, stepWebsite, stepSearch, stepCrossCheck, stepAi, stepReview, type StepId } from "./research";
 import { HttpError } from "./security";
 import { generateHomepage } from "./homepage";
@@ -39,6 +39,7 @@ export async function runStep(siteId: number, step: JobStep): Promise<{ ok: bool
   const snapLocs = c.locations.map((L) => JSON.parse(JSON.stringify(L.fields)) as typeof L.fields);
   const raw = jiraRaw(p.jira.fields);
   applyJiraInstructions(c, raw); // "take from old website x.com" is an instruction, never the content
+  repairJiraFields(c, raw);
   let summary = "", ok = true;
   try {
     if (step === "gbp") summary = await stepGbp(c, ev);

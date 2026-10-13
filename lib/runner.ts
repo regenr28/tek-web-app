@@ -3,7 +3,7 @@ import { one, run } from "./db";
 import { sha256, randomToken } from "./secrets";
 import { loadProject, saveProject, jiraRaw } from "./projects";
 import { applyJiraInstructions, repairJiraFields } from "./collect";
-import { STEPS, stepGbp, stepWebsite, stepSearch, stepCrossCheck, stepAi, stepReview, type StepId } from "./research";
+import { STEPS, stepGbp, stepWebsite, stepSearch, stepPrograms, stepCrossCheck, stepAi, stepReview, type StepId } from "./research";
 import { HttpError } from "./security";
 import { generateHomepage } from "./homepage";
 
@@ -44,7 +44,8 @@ export async function runStep(siteId: number, step: JobStep): Promise<{ ok: bool
   try {
     if (step === "gbp") summary = await stepGbp(c, ev);
     else if (step === "website") summary = await stepWebsite(c, ev, raw);
-    else if (step === "search") summary = await stepSearch(c, ev);
+    else if (step === "search") summary = await stepSearch(c, ev, raw);
+    else if (step === "programs") summary = await stepPrograms(c, ev);
     else if (step === "check") summary = await stepCrossCheck(c, ev, raw);
     else if (step === "ai") summary = await stepAi(c, ev, raw);
     else summary = await stepReview(c, raw);

@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api, ago } from "./api";
 
 type Status = "ok" | "review" | "missing";
-type CField = { value: string; note: string; source: string; status: Status; manual?: boolean };
+type CField = { value: string; note: string; source: string; status: Status; manual?: boolean; prev?: string };
 type Loc = { city: string; state: string; tekmetricId: string; fields: Record<string, CField> };
 type Collection = { fields: Record<string, CField>; locations: Loc[]; pages: string[]; minServices: number; minAmenities: number; research: Record<string, { at: string; ok: boolean; summary: string }> };
 type Project = { key: string; url: string; typeLabel: string; type: string | null; template: string; templateNumber: string; pages: string[]; previewUrl: string; tekmetricId: string; created: string; activity: { type: string; author: string; date: string; details: string }[] };
@@ -92,7 +92,13 @@ export default function DataCollection({ siteId, onChanged }: { siteId: number; 
   const beforeLoc = shown.filter((l) => ["shopName", "cityState"].includes(l.key));
   const afterLoc = shown.filter((l) => !["shopName", "cityState"].includes(l.key));
 
-  const row = (l: { key: string; label: string }, f: CField, onSave: (p: Partial<CField>) => void, copyKey: string, label?: string) => (
+  // "Request a change" on one field: the server rewrites it, searches again for it, or undoes the last change
+  async function revise(key: string, loc: number | undefined, body: { request?: string; undo?: boolean }) {
+    const r = await api<Saved & { ok: boolean; summary: string }>(`/api/sites/${siteId}/collection/revise`, { body: { key, ...(loc != null ? { loc } : {}), ...body } });
+    merge(r);
+    return r;
+  }
+  const row = (l: { key: string; label: string }, f: CField, onSave: (p: Partial<CField>) => void, copyKey: string, label?: string, loc?: number) => (
     <tr key={copyKey} className={`dc-${f.status}`}>
       <td>
         <b className="small">{label || l.label}</b>
@@ -101,7 +107,10 @@ export default function DataCollection({ siteId, onChanged }: { siteId: number; 
           {f.source && <span className="badge">{SOURCE_LABEL[f.source] || f.source}</span>}
         </div>
       </td>
-      <td><AutoText value={f.value} rows={LIST_FIELDS.has(l.key) ? 3 : 1} onSave={(v) => onSave({ value: v })} mono={l.key === "placeId"} /></td>
+      <td>
+        <AutoText value={f.value} rows={LIST_FIELDS.has(l.key) ? 3 : 1} onSave={(v) => onSave({ value: v })} mono={l.key === "placeId"} />
+        <ChangeRequest field={l.key} hasPrev={f.prev != null} busyOther={!!running} onRun={(b) => revise(l.key, loc, b)} />
+      </td>
       <td><AutoText value={f.note} rows={1} small onSave={(v) => onSave({ note: v })} placeholder="—" /></td>
       <td><button className="sm ghost" onClick={() => copy(f.value, copyKey)}>{copied === copyKey ? "✓" : "Copy"}</button></td>
     </tr>
@@ -204,7 +213,7 @@ export default function DataCollection({ siteId, onChanged }: { siteId: number; 
                     </div>
                     {fl.length ? (
                       <div style={{ overflowX: "auto" }}>
-                        <table className="t dc">{head}<tbody>{fl.map((l) => row(l, L.fields[l.key], (p) => saveLoc(i, l.key, p), `l${i}-${l.key}`, `${l.label} ${i + 1}:`))}</tbody></table>
+                        <table className="t dc">{head}<tbody>{fl.map((l) => row(l, L.fields[l.key], (p) => saveLoc(i, l.key, p), `l${i}-${l.key}`, `${l.label} ${i + 1}:`, i))}</tbody></table>
                       </div>
                     ) : <p className="muted small">Nothing to review here.</p>}
                   </div>
@@ -364,6 +373,46 @@ function ProjectCard({ p, editorUrl, previewUrl, onEditor, copy, copied }: { p: 
           ))}</div>
         </details>
       )}
+    </div>
+  );
+}
+
+const CHANGE_HINTS: Record<string, string> = {
+  coupons: "e.g. Put each offer on a new line", socials: "e.g. Search further, I saw one on Google — or paste the link",
+  services: "e.g. Remove duplicates and sort A–Z", about: "e.g. Make it shorter, 2 sentences", hours: "e.g. Search their GBP hours again",
+  warranties: "e.g. Search their website for the warranty", amenities: "e.g. One per line, Title Case",
+};
+/** A one-line box under each value: say what to change in plain words, the AI or a new search does it. Undo puts the old value back. */
+function ChangeRequest({ field, hasPrev, busyOther, onRun }: { field: string; hasPrev: boolean; busyOther: boolean; onRun: (b: { request?: string; undo?: boolean }) => Promise<{ ok: boolean; summary: string }> }) {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const go = async (b: { request?: string; undo?: boolean }) => {
+    setBusy(true); setMsg(null);
+    try { const r = await onRun(b); setMsg({ ok: r.ok, text: r.summary }); if (r.ok && b.request) setText(""); }
+    catch (e) { setMsg({ ok: false, text: (e as Error).message }); }
+    finally { setBusy(false); }
+  };
+  if (!open) return (
+    <div className="row" style={{ gap: 6, marginTop: 4 }}>
+      <button className="sm ghost" style={{ padding: "2px 6px" }} onClick={() => setOpen(true)} title="Ask for a change in plain words">✎ Request a change</button>
+      {hasPrev && <button className="sm ghost" style={{ padding: "2px 6px" }} disabled={busy || busyOther} onClick={() => go({ undo: true })}>↶ Undo</button>}
+      {msg && <span className={`small ${msg.ok ? "muted" : ""}`} style={{ color: msg.ok ? undefined : "var(--error)" }}>{msg.text}</span>}
+    </div>
+  );
+  return (
+    <div className="stack" style={{ gap: 4, marginTop: 4 }}>
+      <div className="row" style={{ gap: 6 }}>
+        <input value={text} maxLength={600} disabled={busy} placeholder={CHANGE_HINTS[field] || "Say what to change, e.g. “Title Case” or “Search again online”"}
+          onChange={(e) => setText(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && text.trim() && !busy) go({ request: text }); if (e.key === "Escape") setOpen(false); }}
+          style={{ flex: 1, fontSize: 12, padding: "4px 8px" }} />
+        <button className="sm primary" disabled={busy || busyOther || !text.trim()} onClick={() => go({ request: text })}>{busy ? "Working…" : "Apply"}</button>
+        {hasPrev && <button className="sm ghost" disabled={busy || busyOther} onClick={() => go({ undo: true })}>↶ Undo</button>}
+        <button className="sm ghost" disabled={busy} onClick={() => { setOpen(false); setMsg(null); }}>✕</button>
+      </div>
+      {busyOther && <span className="small muted">Research is running — requests work again when it finishes.</span>}
+      {msg && <span className="small" style={{ color: msg.ok ? "var(--muted)" : "var(--error)" }}>{msg.ok ? "✓ " : ""}{msg.text}</span>}
     </div>
   );
 }

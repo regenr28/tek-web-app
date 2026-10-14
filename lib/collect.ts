@@ -41,7 +41,7 @@ export const FIELDS = [
 export type FieldKey = (typeof FIELDS)[number]["key"];
 export type Source = "jira" | "gbp" | "website" | "search" | "ai" | "rule" | "manual" | "";
 export type Status = "ok" | "review" | "missing";
-export type CField = { value: string; note: string; source: Source; status: Status; manual?: boolean };
+export type CField = { value: string; note: string; source: Source; status: Status; manual?: boolean; /** value before the last "request a change" (for Undo) */ prev?: string };
 /** Per-shop fields for MSO sites (same labels as the guideline sheet's MSO block). */
 export const LOC_FIELDS = [
   { key: "gbpName", label: "GBP Name" },

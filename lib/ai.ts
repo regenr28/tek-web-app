@@ -285,3 +285,105 @@ async function fetchImageOnce(url: string): Promise<ImagePart | null> {
     return { mime, b64: r.body.toString("base64") };
   } catch { return null; }
 }
+
+// ---------- vision (photo sorting) ----------
+
+/** Free vision models per provider (override with env VISION_MODEL_<PROVIDER>). The custom provider uses its own model. */
+const VISION_DEFAULTS: Partial<Record<ProviderId, string>> = {
+  groq: "meta-llama/llama-4-scout-17b-16e-instruct",
+  gemini: "gemini-flash-latest",
+  openrouter: "google/gemma-3-27b-it:free",
+  cloudflare: "@cf/meta/llama-4-scout-17b-16e-instruct",
+};
+/** Known free daily request limits — used when the provider doesn't report what's left. */
+export const VISION_DAILY: Partial<Record<ProviderId, number>> = { groq: 1000, openrouter: 50, gemini: 250 };
+const VISION_ORDER: ProviderId[] = ["groq", "gemini", "openrouter", "custom", "cloudflare"];
+const visionModel = (id: ProviderId, cfg: ProviderCfg) => process.env[`VISION_MODEL_${id.toUpperCase()}`] || (id === "custom" ? cfg.model : VISION_DEFAULTS[id] || "");
+
+export type VisionUsage = { day: string; used: Partial<Record<ProviderId, number>>; left: Partial<Record<ProviderId, { remaining: number; limit: number; reset: string; at: number }>> };
+const today = () => new Date().toISOString().slice(0, 10);
+export async function visionUsage(): Promise<VisionUsage> {
+  const row = await one<{ value: string }>("SELECT value FROM settings WHERE key = 'vision_usage'");
+  const v = row ? (JSON.parse(row.value) as VisionUsage) : null;
+  return v && v.day === today() ? v : { day: today(), used: {}, left: v?.left || {} };
+}
+async function noteVisionUse(id: ProviderId, left?: { remaining: number; limit: number; reset: string }) {
+  const v = await visionUsage();
+  v.used[id] = (v.used[id] || 0) + 1;
+  if (left) v.left[id] = { ...left, at: Date.now() };
+  await run("INSERT INTO settings (key, value) VALUES ('vision_usage', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [JSON.stringify(v)]);
+}
+
+/** Vision-capable providers that are set up, in the order they're tried, with what's left today. */
+export async function visionProviders() {
+  const s = await getAiSettings();
+  const cool = await cooldowns();
+  const u = await visionUsage();
+  return VISION_ORDER.filter((id) => s.providers[id].enabled && ready(id, s.providers[id]) && !!visionModel(id, s.providers[id])).map((id) => {
+    const rep = u.left[id];
+    const fresh = rep && Date.now() - rep.at < 6 * 3_600_000;
+    const limit = fresh ? rep!.limit : VISION_DAILY[id] || 0;
+    const used = u.used[id] || 0;
+    return {
+      id, label: PROVIDER_INFO[id].label, model: visionModel(id, s.providers[id]), usedToday: used,
+      remaining: fresh ? rep!.remaining : limit ? Math.max(0, limit - used) : null, limit: limit || null,
+      reported: !!fresh, resetIn: fresh ? rep!.reset : "", restingUntil: cool[`vision:${id}`] > Date.now() ? cool[`vision:${id}`] : 0,
+    };
+  });
+}
+
+/**
+ * One image + prompt to the first vision provider that works. A provider that hits its limit rests (for photos only —
+ * text research keeps using it) and the next one is tried. Throws AiError("ALL_RESTING …") when none can take it now.
+ */
+export async function callVision(opts: { system: string; user: string; image: ImagePart; maxTokens?: number }): Promise<{ text: string; provider: ProviderId; model: string }> {
+  const s = await getAiSettings();
+  const cool = await cooldowns();
+  const all = VISION_ORDER.filter((id) => s.providers[id].enabled && ready(id, s.providers[id]) && !!visionModel(id, s.providers[id]));
+  if (!all.length) throw new AiError("No AI that can look at photos is set up. Add a free Groq key (or Gemini / OpenRouter) in Settings → AI providers.");
+  const ids = all.filter((id) => !(cool[`vision:${id}`] > Date.now()));
+  if (!ids.length) {
+    const next = Math.min(...all.map((id) => cool[`vision:${id}`] || 0));
+    throw new AiError(`ALL_RESTING ${next}`);
+  }
+  const errors: string[] = [];
+  for (const id of ids) {
+    const cfg = s.providers[id];
+    const key = keyFor(id, cfg);
+    if (!key) continue;
+    const model = visionModel(id, cfg);
+    try {
+      if (id === "gemini") {
+        const text = await gemini(key, model, opts.system, opts.user, [opts.image]);
+        await noteVisionUse(id);
+        return { text, provider: id, model };
+      }
+      const base = baseFor(id, cfg);
+      if (!base) throw new Error("Missing base URL / Account ID");
+      const headers: Record<string, string> = { Authorization: `Bearer ${key}`, "Content-Type": "application/json" };
+      if (id === "openrouter") { headers["HTTP-Referer"] = "https://github.com/duda-preview-audit"; headers["X-Title"] = "Duda Preview Audit"; }
+      const body: Record<string, unknown> = {
+        model, temperature: 0.1, max_tokens: opts.maxTokens || 400,
+        messages: [{ role: "system", content: opts.system }, { role: "user", content: [{ type: "text", text: opts.user }, { type: "image_url", image_url: { url: `data:${opts.image.mime};base64,${opts.image.b64}` } }] }],
+      };
+      if (id === "groq") body.response_format = { type: "json_object" };
+      const send = () => safeFetch(base + "/chat/completions", { hosts: "public", httpsOnly: !devHttp(), method: "POST", headers, body: JSON.stringify(body), timeoutMs: 60000, maxBytes: 2 * 1024 * 1024 });
+      let r = await send();
+      if (r.status === 400 && body.response_format && /response_format|json/i.test(r.text())) { delete body.response_format; r = await send(); } // model without JSON mode
+      const txt = r.text();
+      if (r.status >= 400) throw new HttpFail(r.status, `HTTP ${r.status}${r.status === 429 ? " (rate limited)" : ""}: ${txt.slice(0, 200)}`, Number(r.headers.get("retry-after")) || 0);
+      const j = JSON.parse(txt);
+      const text = j?.choices?.[0]?.message?.content || "";
+      if (!text) throw new Error("Empty response");
+      // Groq / OpenRouter report the requests left for today in these headers
+      const rem = Number(r.headers.get("x-ratelimit-remaining-requests") ?? r.headers.get("x-ratelimit-remaining") ?? NaN);
+      const lim = Number(r.headers.get("x-ratelimit-limit-requests") ?? r.headers.get("x-ratelimit-limit") ?? NaN);
+      await noteVisionUse(id, Number.isFinite(rem) && Number.isFinite(lim) && lim >= 100 ? { remaining: rem, limit: lim, reset: r.headers.get("x-ratelimit-reset-requests") || "" } : undefined);
+      return { text: typeof text === "string" ? text : JSON.stringify(text), provider: id, model };
+    } catch (e) {
+      errors.push(`${PROVIDER_INFO[id].label}: ${(e as Error).message.slice(0, 160)}`);
+      await coolDown(`vision:${id}`, restFor(e)).catch(() => {});
+    }
+  }
+  throw new AiError(errors.join(" · "));
+}

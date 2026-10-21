@@ -5,6 +5,7 @@ import { api, ago, STATUS_LABEL, STATUS_TONE, type Member } from "./api";
 import FactsEditor from "./FactsEditor";
 import DataCollection from "./DataCollection";
 import Prompts from "./Prompts";
+import PhotoSorter from "./PhotoSorter";
 import { emptyFacts, normalizeFacts, type Facts } from "@/lib/facts";
 
 type Site = {
@@ -24,7 +25,7 @@ export default function SiteView({ id, me }: { id: number; me: Me }) {
   const [data, setData] = useState<{ site: Site; lastRun: Run | null; pages: PageRow[]; dudaApi: boolean; ai: boolean } | null>(null);
   const [findings, setFindings] = useState<Finding[]>([]);
   const [members, setMembers] = useState<Member[]>([]);
-  const [tab, setTab] = useState<"collection" | "prompts" | "findings" | "facts" | "pages" | "details" | null>(null);
+  const [tab, setTab] = useState<"collection" | "prompts" | "photos" | "findings" | "facts" | "pages" | "details" | null>(null);
   const [err, setErr] = useState("");
 
   const load = useCallback(async () => {
@@ -38,7 +39,7 @@ export default function SiteView({ id, me }: { id: number; me: Me }) {
   useEffect(() => {
     if (!data || tab) return;
     const q = new URLSearchParams(window.location.search).get("tab");
-    setTab(q === "homepage" || q === "prompts" ? "prompts" : q === "collection" || q === "findings" || q === "facts" || q === "pages" || q === "details" ? q : data.site.has_project ? "collection" : "findings");
+    setTab(q === "homepage" || q === "prompts" ? "prompts" : q === "collection" || q === "photos" || q === "findings" || q === "facts" || q === "pages" || q === "details" ? q : data.site.has_project ? "collection" : "findings");
   }, [data]); // eslint-disable-line
 
   if (!data) return <p className="muted">{err || "Loading…"}</p>;
@@ -79,13 +80,14 @@ export default function SiteView({ id, me }: { id: number; me: Me }) {
 
       <div className="card">
         <div className="tabs">
-          {(["collection", "prompts", "findings", "facts", "pages", "details"] as const).map((t) => (
+          {(["collection", "prompts", "photos", "findings", "facts", "pages", "details"] as const).map((t) => (
             <button key={t} className={tab === t ? "active" : ""} onClick={() => setTab(t)}>
-              {t === "collection" ? "Data Collection" : t === "prompts" ? "Prompts" : t === "findings" ? `QA Audit (${open.length})` : t === "facts" ? <>QA facts {!site.facts && <span className="badge warning">missing</span>}</> : t === "pages" ? `Pages (${data.pages.length})` : "Details"}
+              {t === "collection" ? "Data Collection" : t === "prompts" ? "Prompts" : t === "photos" ? "Photos" : t === "findings" ? `QA Audit (${open.length})` : t === "facts" ? <>QA facts {!site.facts && <span className="badge warning">missing</span>}</> : t === "pages" ? `Pages (${data.pages.length})` : "Details"}
             </button>
           ))}
         </div>
         {tab === "collection" && <DataCollection siteId={id} onChanged={load} />}
+        {tab === "photos" && <PhotoSorter siteId={id} />}
         {tab === "prompts" && <Prompts siteId={id} canManage={me.role !== "member"} />}
         {tab === "findings" && <FindingsTable siteId={id} findings={findings} members={members} me={me} reload={load} onError={setErr} />}
         {tab === "facts" && <FactsTab site={site} dudaApi={data.dudaApi} ai={data.ai} onSaved={load} onError={setErr} />}

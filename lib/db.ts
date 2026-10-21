@@ -121,6 +121,13 @@ const SCHEMA = [
   )`,
   `CREATE INDEX IF NOT EXISTS security_events_at ON security_events(at)`,
   // Background research runs (keep going when the person leaves the page)
+  `CREATE TABLE IF NOT EXISTS photo_results (
+    site_id INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+    photo_key TEXT NOT NULL,
+    result TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (site_id, photo_key)
+  )`,
   `CREATE TABLE IF NOT EXISTS jobs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     site_id INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
@@ -220,6 +227,7 @@ const COLUMNS: [table: string, column: string, ddl: string][] = [
   ["sites", "tekmetric_id", "TEXT"],
   ["sessions", "remember", "INTEGER NOT NULL DEFAULT 0"],
   ["sites", "homepage_json", "TEXT"],
+  ["sites", "photos_json", "TEXT"],
   // What a member may open: all | projects | websites (Super Admins always see everything)
   ["users", "access", "TEXT NOT NULL DEFAULT 'all'"],
   // Location / FAQ / Meta / Service pages / URL redirects generated from the Prompts tab

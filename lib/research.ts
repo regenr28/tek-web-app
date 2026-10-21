@@ -967,7 +967,28 @@ function locationIndexFor(c: Collection, text: string) {
   return hits.length === 1 ? hits[0].i : -1;
 }
 /** Opens each page (directly, or through Groq's browser when the site blocks us) and checks it shows this shop. */
-async function confirmListings(c: Collection, list: WebResult[], host = ""): Promise<Record<string, { loc: number; reason: string }>> {
+/**
+ * The contact details a social page carries in its HTML. Facebook / Instagram put the page's phone, email, website and
+ * address in embedded JSON (escaped like "+1 620-741-5050", "conklinbrosauto\u0040gmail.com", "https:\/\/site.com"),
+ * not in the visible text — so read them out of the raw HTML. Returns a short, clean text (never the whole page,
+ * so random digits in IDs can't look like a phone number).
+ */
+export function socialContactText(html: string): { text: string; loginWall: boolean } {
+  const h = html.slice(0, 3_000_000)
+    .replace(/\\u0040/g, "@").replace(/\\u0026/g, "&").replace(/\\u00a0|\\u202f/g, " ").replace(/\\u2013|\\u2014/g, "-").replace(/\\\//g, "/").replace(/&#064;|&#x40;/gi, "@").replace(/&amp;/g, "&");
+  const $ = cheerio.load(html.slice(0, 1_500_000));
+  const meta = [$("title").text(), $('meta[property="og:title"]').attr("content") || "", $('meta[name="description"]').attr("content") || "", $('meta[property="og:description"]').attr("content") || "", $("script[type='application/ld+json']").text()].join(" ");
+  const phones = [...new Set((h.match(/(?:\+?1[\s.-]?)?\(?\b[2-9]\d{2}\)?[\s.-]\d{3}[\s.-]\d{4}\b/g) || []).map((x) => x.trim()))].slice(0, 10);
+  const emails = [...new Set((h.match(/[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[a-z]{2,}/gi) || []).map((x) => x.toLowerCase()).filter((x) => !/facebook|fbcdn|instagram|meta\.com|example\./.test(x)))].slice(0, 10);
+  const sites = [...new Set((h.match(/https?:\/\/(?:www\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)+/gi) || []).map((u) => u.replace(/^https?:\/\/(www\.)?/i, "").toLowerCase())
+    .filter((d) => !/facebook|fbcdn|fbsbx|instagram|cdninstagram|whatsapp|meta\.com|messenger|oculus|google|gstatic|apple\.com|microsoft|w3\.org|schema\.org|youtube|tiktok|twitter|x\.com|linkedin|cloudflare|akamai/.test(d)))].slice(0, 15);
+  // addresses written as "1426 north Summit, Arkansas City, KS, United States, 67005" in the JSON
+  const addrs = [...new Set(h.match(/\b\d{2,6} [A-Za-z0-9 .'-]{3,40}, [A-Za-z .'-]{2,30}, [A-Z]{2}\b[^"<]{0,40}/g) || [])].slice(0, 5);
+  const loginWall = /\/login(?:\.php|\/)|log in to facebook|login_form|You must log in/i.test(h.slice(0, 200_000)) && !phones.length && !emails.length && !sites.length;
+  return { text: [meta, ...phones, ...emails, ...sites, ...addrs].join(" \n ").replace(/\s+/g, " ").slice(0, 20_000), loginWall };
+}
+
+async function confirmListings(c: Collection, list: WebResult[], host = "", diag: Record<string, string> = {}): Promise<Record<string, { loc: number; reason: string }>> {
   const out: Record<string, { loc: number; reason: string }> = {};
   if (!list.length) return out;
   const locs = locInfos(c);
@@ -982,12 +1003,15 @@ async function confirmListings(c: Collection, list: WebResult[], host = ""): Pro
     try {
       const res = await safeFetch(r.url, { hosts: "public", headers: { "User-Agent": UA, Accept: "text/html", "Accept-Language": "en-US" }, timeoutMs: 12000, maxBytes: 3_000_000 });
       if (res.status < 400) {
-        const $ = cheerio.load(res.text());
-        const text = [$("title").text(), $('meta[name="description"]').attr("content") || "", $('meta[property="og:description"]').attr("content") || "", $("script[type='application/ld+json']").text(), $("body").text()].join(" ").replace(/\s+/g, " ").slice(0, 200_000);
+        const html = res.text();
+        const $ = cheerio.load(html);
+        const social = /facebook|instagram/i.test(platformOf(r.url)) ? socialContactText(html) : null;
+        const text = social ? social.text : [$("title").text(), $('meta[name="description"]').attr("content") || "", $('meta[property="og:description"]').attr("content") || "", $("script[type='application/ld+json']").text(), $("body").text()].join(" ").replace(/\s+/g, " ").slice(0, 200_000);
         const b = check(text);
         if (b.s.length) { out[r.url] = { loc: b.loc, reason: `the ${platformOf(r.url)} page shows ${b.s.join(", ")}` }; return; }
-      }
-    } catch { /* blocked — try Groq */ }
+        diag[r.url] = social?.loginWall || /\/login/.test(res.url) ? "login" : "read";
+      } else diag[r.url] = `http ${res.status}`;
+    } catch { diag[r.url] = "blocked"; /* try Groq */ }
     left.push(r);
   }));
   if (!left.length) return out;
@@ -1002,6 +1026,7 @@ For each page copy the exact address, phone number and website link it shows${ho
       if (!r || !pg.shows) continue;
       const b = check(pg.shows);
       if (b.s.length) out[r.url] = { loc: b.loc, reason: `the ${platformOf(r.url)} page shows ${b.s.join(", ")} (checked by Groq AI — open it to double-check)` };
+      else if (diag[r.url] !== "read") diag[r.url] = `${diag[r.url] || ""} groq-nothing`;
     }
   } catch { /* no Groq / limit — leave them out */ }
   return out;
@@ -1124,6 +1149,9 @@ export function searchQueries(c: Collection, extra: { id?: { host: string; stem:
     const other = [extra.hintName, extra.altName].find((n) => n && nameSimilarity(n, name) < 0.99);
     if (socialCount < 4 && other) queries.push(`"${other}" ${where} facebook OR instagram`);
     if (socialCount < 4 && extra.id?.host) queries.push(`"${extra.id.host}" facebook OR instagram OR yelp`);
+    // their phone number finds profiles whose name is written differently (the snippet then shows the number = proof)
+    const ph = digits(c.fields.phone.value).slice(-10);
+    if (socialCount < 4 && ph.length === 10) queries.push(`"${ph.slice(0, 3)}-${ph.slice(3, 6)}-${ph.slice(6)}" OR "(${ph.slice(0, 3)}) ${ph.slice(3, 6)}-${ph.slice(6)}" facebook OR instagram OR yelp`);
   }
   const needs = (["coupons", "warranties", "financing", "certifications"] as FieldKey[]).filter((k) => c.fields[k].status !== "ok");
   if (needs.length) queries.push(`${qn} ${where} coupon OR special OR warranty OR "NAPA AutoCare" OR financing OR ASE`);
@@ -1163,7 +1191,8 @@ export async function stepSearch(c: Collection, ev: Evidence, raw: Record<string
     if (names.some((n) => nameIn(n, `${r.title} ${r.snippet} ${r.url}`))) return true; // full name, incl. handles like /SSRepairCenter
     let u = r.url; try { u = decodeURIComponent(r.url); } catch { /* keep */ }
     const hay = norm(`${r.title} ${r.snippet} ${u}`);
-    return nameToks.some((toks) => toks.filter((t) => hay.includes(t)).length / toks.length >= 0.6) || identityProof(r, id).length > 0;
+    return nameToks.some((toks) => toks.filter((t) => hay.includes(t)).length / toks.length >= 0.6) || identityProof(r, id).length > 0
+      || verifyListing(c, r).strong.some((x) => /phone/.test(x)); // a different name, but their phone number
   };
   const candidates = results.filter((r) => platformOf(r.url) && profileOf(r.url) && relevant(r) && !GENERIC_SOCIAL.test(new URL(r.url).pathname));
   // Only add a profile when the listing shows this shop's phone, street address, ZIP or city + state — a similar name isn't enough
@@ -1188,13 +1217,23 @@ export async function stepSearch(c: Collection, ev: Evidence, raw: Record<string
   if (id.stem) for (const [pl, url] of [["Instagram", `https://www.instagram.com/${id.stem}/`], ["Facebook", `https://www.facebook.com/${id.stem}`]] as const)
     if (!have.has(pl) && !keys.has(profileOf(url)!.key)) unsure.unshift({ r: { title: "", snippet: "", url, guessed: true } as WebResult & { guessed?: boolean }, cityOnly: false });
   // Second chance: open the page itself (or let Groq open it) and look for the address / phone / their website
-  const confirmed = await confirmListings(c, unsure.slice(0, 7).map((x) => x.r), id.host);
+  const diag: Record<string, string> = {};
+  const confirmed = await confirmListings(c, unsure.slice(0, 7).map((x) => x.r), id.host, diag);
   for (const x of unsure) {
     const clean = profileOf(x.r.url)!.clean;
     const ok = confirmed[x.r.url];
     if (ok) { accepted.push(x.r); locHint[x.r.url] = ok.loc; reasons[x.r.url] = (x.r as { guessed?: boolean }).guessed ? `${ok.reason} (found by trying their domain name as the handle)` : ok.reason; }
     else if ((x.r as { guessed?: boolean }).guessed) continue; // a guess that couldn't be confirmed isn't worth listing
-    else rejected.push(`${clean} (${x.cityOnly ? "only the city matched — could be another state" : "only the name is similar — no matching address, phone or city"})`);
+    else {
+      // say what really happened: a page we couldn't read is not "a page without their details"
+      const d = diag[x.r.url] || "";
+      const why = /login|blocked|http/.test(d)
+        ? `${platformOf(x.r.url)} didn't let the app read the page (${/login/.test(d) ? "it shows a log-in page to servers" : "blocked"}), and the search result didn't show their phone, address or website — open it; if it's theirs, paste it in “Request a change”`
+        : x.cityOnly ? "only the city matched — could be another state"
+        : d === "read" ? "the page was read but doesn't show their phone, address or website"
+        : "the search result only shows a similar name — no phone, address or website to confirm it";
+      rejected.push(`${clean} (${why})`);
+    }
   }
   ev.socialFinds = [
     ...(ev.socialFinds || []).filter((f) => f.via !== "search"),

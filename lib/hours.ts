@@ -65,7 +65,7 @@ function readRange(a: string, b: string): Span | null {
 }
 
 /** Read the Jira hours text. Fails (instead of guessing) when anything is unclear. */
-export function readHours(text: string): ReadResult {
+export function readHours(text: string, _swapped = false): ReadResult {
   const raw = (text || "").trim();
   if (!raw) return { ok: false, why: "No hours in Jira." };
   let t = normalize(raw);
@@ -80,7 +80,23 @@ export function readHours(text: string): ReadResult {
   const GROUP = new RegExp(`${DAY_RE}(?:\\s*-\\s*${DAY_RE})?(?:\\s*(?:,|&|and|\\/)\\s*${DAY_RE}(?:\\s*-\\s*${DAY_RE})?)*`, "gi");
   const groups = [...t.matchAll(GROUP)];
   if (!groups.length) return { ok: false, why: "Jira doesn't say which days these hours are for." };
-  if (LEFTOVER_TIME.test(t.slice(0, groups[0].index))) return { ok: false, why: "Jira lists times before naming the days." };
+  if (LEFTOVER_TIME.test(t.slice(0, groups[0].index))) {
+    // "7:30am - 5:30pm, M-F" / "8-5 M-F, 8-12 Sat": times written before the days → put each time after its days and read again
+    if (_swapped) return { ok: false, why: "Jira lists times before naming the days." };
+    const items = [...[...t.matchAll(RANGE)].map((m) => ({ k: "t" as const, i: m.index!, s: m[0] })), ...groups.map((m) => ({ k: "d" as const, i: m.index!, s: m[0] }))]
+      .sort((a, b) => a.i - b.i);
+    const pairs: string[] = [];
+    for (let i = 0; i < items.length; i += 2) {
+      if (items[i]?.k !== "t" || items[i + 1]?.k !== "d") return { ok: false, why: "Jira lists times before naming the days, in a way that can't be read for sure." };
+      pairs.push(`${items[i + 1].s} ${items[i].s}`);
+    }
+    // nothing else may be left over (only separators / filler words)
+    let rest = t;
+    for (const it of items) rest = rest.replace(it.s, " ");
+    if (/[a-z0-9]/i.test(rest.replace(/\b(open|from|hours?|and|on|daily)\b/g, " "))) return { ok: false, why: `Didn't understand "${rest.replace(/[\s,;|.]+/g, " ").trim()}" in the Jira hours.` };
+    const lunchPart = lunch ? ` ; closed for lunch ${fmtTime(lunch[0])}-${fmtTime(lunch[1])}` : "";
+    return readHours(pairs.join(" ; ") + lunchPart, true);
+  }
 
   const week: WeekHours = {};
   for (let gi = 0; gi < groups.length; gi++) {
@@ -234,6 +250,9 @@ function groupNames(days: Day[]) {
  * Jira hours → the sheet's format, plus the GBP comparison note.
  * The formatted value is read back and must give exactly the same days and times as Jira, or Jira's text is kept as-is.
  */
+/** Jira text kept as written, but on one line ("Mon-Fri 8-5\nSat 8-12" → "Mon-Fri 8-5 | Sat 8-12"). */
+const oneLine = (t: string) => t.trim().split(/\s*\n+\s*/).filter(Boolean).join(" | ");
+
 export function hoursFromJira(jiraText: string, gbpHours?: Record<string, string> | null) {
   const notes: string[] = [];
   const r = readHours(jiraText);
@@ -241,13 +260,13 @@ export function hoursFromJira(jiraText: string, gbpHours?: Record<string, string
   if (!r.ok) {
     notes.push(`Kept exactly as written in Jira — ${r.why}`);
     if (gbp) notes.push(`GBP shows: ${groupDays(gbp.week, valueSlot).join(" | ")}${gbp.lunch ? ` | Closed for Lunch: ${fmtSpan(gbp.lunch)}` : ""}`);
-    return { value: jiraText.trim(), note: notes.join("\n"), status: "review" as const, formatted: false };
+    return { value: oneLine(jiraText), note: notes.join("\n"), status: "review" as const, formatted: false };
   }
   const value = formatHours(r);
   const back = readHours(value);
   const openDays = (w: WeekHours) => JSON.stringify(DAYS.map((d) => (w[d] && !w[d]!.closed ? w[d] : null)));
   if (!back.ok || openDays(back.week) !== openDays(r.week) || JSON.stringify(back.lunch) !== JSON.stringify(r.lunch)) {
-    return { value: jiraText.trim(), note: "Kept exactly as written in Jira — the reformatted hours didn't read back the same.", status: "review" as const, formatted: false };
+    return { value: oneLine(jiraText), note: "Kept exactly as written in Jira — the reformatted hours didn't read back the same.", status: "review" as const, formatted: false };
   }
   let status: "ok" | "review" = "ok";
   if (!gbp) notes.push("From Jira. GBP hours weren't available to compare.");

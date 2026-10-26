@@ -379,7 +379,7 @@ async function resolveGbpLink(link: string): Promise<Place | null> {
   let url = link.trim();
   let html = "";
   try {
-    const r = await safeFetch(url, { hosts: ["maps.app.goo.gl", "goo.gl", "*.google.com", "google.com", "g.page"], headers: { "User-Agent": UA, "Accept-Language": "en-US" }, timeoutMs: 15000, maxBytes: 3_000_000 });
+    const r = await safeFetch(url, { hosts: ["maps.app.goo.gl", "goo.gl", "*.google.com", "google.com", "g.page", "share.google"], headers: { "User-Agent": UA, "Accept-Language": "en-US" }, timeoutMs: 15000, maxBytes: 3_000_000 });
     url = r.url; html = r.text();
   } catch { /* use the link as-is */ }
   const dec = decodeURIComponent(url);
@@ -837,6 +837,8 @@ export function profileOf(raw: string): { platform: string; key: string; clean: 
   switch (platform) {
     case "Facebook":
       if (s0 === "profile.php" && u.searchParams.get("id")) { keep = ["profile.php"]; query = `?id=${u.searchParams.get("id")}`; break; }
+      // facebook.com/people/<Name>/<id>/ is a page link (newer pages) — keep name + id
+      if (s0 === "people" && segs[2] && /^\d{6,}$/.test(segs[2])) { keep = segs.slice(0, 3); break; }
       if (/^(posts|photos|videos|events|watch|reel|reels|story\.php|permalink\.php|sharer|sharer\.php|share|groups|hashtag|marketplace|login|search|people|dialog|plugins|tr|home\.php|l\.php|media)$/.test(s0)) return null;
       keep = s0 === "p" ? segs.slice(0, 2) : s0 === "pages" ? segs.slice(0, 3) : segs.slice(0, 1);
       break;
@@ -855,7 +857,7 @@ export function profileOf(raw: string): { platform: string; key: string; clean: 
   if (!keep || !keep.length) return null;
   const host = u.hostname.replace(/^(m|mobile|web|business|l)\./i, "www.").replace(/^(?!www\.)/, "www.");
   const path = keep.map((x) => encodeURIComponent(x).replace(/%40/g, "@")).join("/");
-  return { platform, key: `${platform}:${keep.join("/").toLowerCase()}`, clean: `https://${host}/${path}${query}` };
+  return { platform, key: `${platform}:${keep.join("/").toLowerCase()}${query.toLowerCase()}`, clean: `https://${host}/${path}${query}` };
 }
 
 /** Clean list: profile links only, one per platform (first one wins — Jira, then website, then search). */

@@ -67,6 +67,8 @@ export const MSO_LABELS: Partial<Record<FieldKey, string>> = {
 export type Collection = {
   /** The social links that are really in the Jira export (url + which location). The only links ever labelled "from Jira". */
   jiraSocials?: { url: string; loc: number }[];
+  /** the new Jira form's "Duda Payload" has been read into this collection */
+  payloadRead?: boolean;
   locations: Loc[];
   fields: Record<FieldKey, CField>;
   pages: string[];
@@ -302,7 +304,16 @@ export function certsMentioned(text: string): string[] {
 
 /** Social links exactly as written in the Jira export's "Social Links" field. */
 export function jiraSocialLinks(f: JiraFields): string[] {
-  return uniqLines(splitLines(pick(f, /^Social Links$/i)).filter((s) => /^https?:\/\//i.test(s) || /\.(com|net|org)/i.test(s)));
+  // lines can be "Facebook: https://…" — take the link itself; Google (GBP) links are not socials (they go to the GBP Link field)
+  return uniqLines(splitLines(pick(f, /^Social Links$/i)).map((s) => s.match(/https?:\/\/\S+/i)?.[0] || s.replace(/^[A-Za-z ]{2,30}:\s*/, ""))
+    .filter((s) => (/^https?:\/\//i.test(s) || /\.(com|net|org)/i.test(s)) && !isGoogleLink(s)));
+}
+const isGoogleLink = (u: string) => /(^|\/\/|\.)(share\.google|g\.page|maps\.app\.goo\.gl|goo\.gl\/maps|google\.[a-z.]+\/maps|maps\.google\.)/i.test(u);
+/** A Google Business Profile link given in Jira (its own field, or in the Social Links answer). */
+export function jiraGbpLink(f: JiraFields): string {
+  const direct = pick(f, /^GBP Link$/i, /google business profile/i);
+  if (direct) return direct.match(/https?:\/\/\S+/i)?.[0] || "";
+  return splitLines(pick(f, /^Social Links$/i)).map((s) => s.match(/https?:\/\/\S+/i)?.[0] || "").find((u) => u && isGoogleLink(u)) || "";
 }
 
 export function fromJira(jira: JiraProject, f: JiraFields, opts: { minAmenities: number; editorUrl?: string }): Collection {
@@ -325,7 +336,9 @@ export function fromJira(jira: JiraProject, f: JiraFields, opts: { minAmenities:
 
   const jobs = pick(f, /what email would you like to (use|receive).*job/i);
   const primary = pick(f, /^Primary Contact Email$/i, /company email/i);
+  const pub = pick(f, /^Public Email$/i);
   if (jobs) set("email", F(jobs.toLowerCase(), "jira"));
+  else if (pub) set("email", F(pub.toLowerCase(), "jira", "review", "No job-applications email in Jira — used the shop's public email from the Jira form."));
   else if (primary) set("email", F(primary.toLowerCase(), "jira", "review", "No job-applications email in Jira — used the Primary Contact Email."));
 
   set("businessType", F("Auto Repair Shop", "rule", "ok"));
@@ -341,6 +354,9 @@ export function fromJira(jira: JiraProject, f: JiraFields, opts: { minAmenities:
   if (dom) set("domain", F(domainOf(dom), "jira"));
   else if (cur) set("domain", F(domainOf(cur), "rule", "review", "No domain given in Jira — using their current website's domain."));
 
+  const gbpLink = jiraGbpLink(f);
+  if (gbpLink) set("gbpLink", F(gbpLink, "jira", "review", "GBP link from Jira — research reads the listing from it and converts it to the CID link."));
+
   const socials = jiraSocialLinks(f);
   set("socials", F(socials.join("\n\n"), socials.length ? "jira" : "", "review", socials.length ? "Search found accounts will be added during research." : "No social links in Jira — research will look for them."));
   c.jiraSocials = socials.map((url) => ({ url, loc: 0 }));
@@ -351,7 +367,10 @@ export function fromJira(jira: JiraProject, f: JiraFields, opts: { minAmenities:
 
   const excludes = /yes/i.test(pick(f, /types of vehicles you do not service/i));
   const notServiced = pick(f, /vehicles not serviced/i);
-  set("vehicles", excludes && notServiced
+  const makes = pick(f, /^Vehicles Serviced \(Makes\)$/i);
+  set("vehicles", makes
+    ? F(makes, "jira", "review", "From Jira — the makes they work on (not all makes). Check the template's wording.")
+    : excludes && notServiced
     ? F(`All Makes and Models EXCEPT ${notServiced.replace(/\s+/g, " ").trim()}`, "rule", "ok")
     : F("All Makes and Models", "rule", "ok"));
 
@@ -383,7 +402,9 @@ export function fromJira(jira: JiraProject, f: JiraFields, opts: { minAmenities:
   set("amenities", F(amenities.join("\n"), "jira", amenities.length >= c.minAmenities ? "ok" : "review",
     amenities.length < c.minAmenities ? `Template needs ${c.minAmenities}; Jira has ${amenities.length}. Research will add more from their website/socials.` : ""));
 
-  const instr = [pick(f, /^Instructions$/i), pick(f, /what other sections/i)].filter(Boolean).join("\n\n");
+  const featured = pick(f, /^Featured Services$/i);
+  const payloadExtra = pick(f, /^Other Payload Details$/i);
+  const instr = [pick(f, /^Instructions$/i), pick(f, /what other sections/i), featured ? `Featured services: ${featured}` : "", payloadExtra ? `Also in the Jira form:\n${payloadExtra}` : "", pick(f, /^Payload Problem$/i)].filter(Boolean).join("\n\n");
   set("specialNotes", F(instr, "jira", instr ? "review" : "ok", instr ? "Special instructions from Jira — read before building." : ""));
 
   set("template", F(jira.template, "jira", jira.template ? "ok" : "missing"));
@@ -392,6 +413,7 @@ export function fromJira(jira: JiraProject, f: JiraFields, opts: { minAmenities:
   if (opts.editorUrl) set("editorUrl", F(opts.editorUrl, "manual", "ok"));
 
   c.pages = jira.pages;
+  c.payloadRead = (f["Duda Payload"] || []).length > 0;
 
   // ---- MSO: one block per shop ----
   const addrs = parseAddresses(rawAddr);

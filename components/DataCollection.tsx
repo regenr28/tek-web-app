@@ -235,7 +235,7 @@ export default function DataCollection({ siteId, onChanged }: { siteId: number; 
 
       <div className="grid2">
         <div className="card stack" style={{ boxShadow: "none" }}>
-          <h3 style={{ margin: 0 }}>Requested pages <span className="muted small">(column D)</span></h3>
+          <h3 style={{ margin: 0 }}>{d.project?.type === "basic" ? "Requested sections" : "Requested pages"} <span className="muted small">(column D)</span></h3>
           <AutoText value={c.pages.join("\n")} rows={6} onSave={savePages} />
           <div className="row small">
             <span className="muted">Minimums:</span>

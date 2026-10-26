@@ -1,6 +1,6 @@
 import { one, run } from "./db";
 import { HttpError } from "./security";
-import { parseJiraXlsx, toProject, pick, type JiraFields, type JiraProject } from "./jira";
+import { parseJiraXlsx, toProject, pick, applyPayload, applyDescription, type JiraFields, type JiraProject } from "./jira";
 import { fromJira, normalizeCollection, applyRules, fillCityState, toFacts, jiraSocialLinks, type Collection, FIELDS } from "./collect";
 import type { Evidence } from "./research";
 
@@ -65,6 +65,26 @@ export async function loadProject(id: number) {
       const i = collection.locations.findIndex((L) => L.city && t.includes(L.city.toLowerCase().replace(/[^a-z]/g, "")));
       return { url, loc: Math.max(0, i) };
     });
+  }
+  // Projects imported before the new Jira form was understood: read its "Duda Payload" now and fill only the blanks
+  if (jira && (jira.fields["Duda Payload"] || []).length && !collection.payloadRead) {
+    try {
+      const fields: JiraFields = { ...jira.fields };
+      applyPayload(fields); applyDescription(fields);
+      const project = toProject(fields, jira.project.activity || []);
+      const draft = fromJira(project, fields, { minAmenities: collection.minAmenities });
+      for (const f of FIELDS) {
+        const cur = collection.fields[f.key], nf = draft.fields[f.key];
+        if (cur.manual || !nf.value.trim()) continue;
+        const replaceRule = f.key === "vehicles" && cur.source === "rule" && nf.source === "jira";
+        if (!cur.value.trim() || replaceRule) collection.fields[f.key] = nf;
+      }
+      if (!collection.pages.length) collection.pages = project.pages;
+      collection.jiraSocials = draft.jiraSocials;
+      collection.payloadRead = true;
+      await run("UPDATE sites SET collection_json = ?, jira_json = ?, template = COALESCE(NULLIF(?, ''), template), updated_at = datetime('now') WHERE id = ?",
+        [JSON.stringify(collection), JSON.stringify({ fields, project }), project.template, id]);
+    } catch { /* leave the project as it was */ }
   }
   return {
     row: r, jira,

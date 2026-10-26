@@ -9,11 +9,20 @@ export const UA =
 export type Block = { id: number; tag: string; text: string; selector: string; global: boolean; quote?: boolean };
 export type Img = { id: number; src: string; alt: string | null; selector: string; global: boolean; context: string; decorative: boolean };
 export type Link = { href: string; abs: string; text: string; selector: string; global: boolean };
+export type BookButton = { selector: string; href: string | null; text: string; global: boolean };
 export type PageData = {
   url: string; finalUrl: string; status: number; title: string; metaDescription: string; linkedFrom?: string;
   h1s: string[]; headings: { level: number; text: string; selector: string }[];
   blocks: Block[]; images: Img[]; links: Link[]; html: string;
+  /** e-mail addresses Duda contact forms send to (hidden "dmformsendto" inputs) */
+  formRecipients?: string[];
+  /** ShopGenie "Book appointment" buttons (.shopgenie-book-appt-bt) — must not have an href */
+  bookButtons?: BookButton[];
+  /** which device layout this was read from */
+  device?: string;
 };
+/** ShopGenie's custom "Book appointment" button — opens the booking widget, so it must not link anywhere. */
+export const BOOK_BTN = ".shopgenie-book-appt-bt";
 
 const SKIP = "script,style,noscript,template,svg,iframe,link,meta,[hidden],[aria-hidden='true'][style*='display: none'],[style*='display:none'],[style*='display: none']";
 const GLOBAL_SEL = "header,footer,#hcontainer,#fcontainer,.dmHeader,.dmFooter,.dmHeaderContainer,.dmFooterContainer,#dm-footer,.dmNavigation,nav,[role=navigation],.main-navigation,#hamburger-drawer,#hamburger-header-container,#hamburger-header";
@@ -143,6 +152,8 @@ export async function discover(previewUrl: string, maxPages = 60) {
     }));
     depth++;
   }
+  // Duda serves the home page at both "/" and "/home" — audit it once
+  if ([...found].some((u) => pagePath(u, scope) === "/")) for (const u of [...found]) if (pagePath(u, scope) === "/home") found.delete(u);
   const pages = [...found].sort((a, b) => pagePath(a, scope).length - pagePath(b, scope).length || a.localeCompare(b));
   return { scope, pages: pages.map((u) => ({ url: u, from: from.get(u) })), errors };
 }
@@ -179,7 +190,11 @@ export function extract(url: string, finalUrl: string, status: number, html: str
   const $ = cheerio.load(html);
   const title = clean($("title").first().text());
   const metaDescription = clean($('meta[name="description"]').attr("content") || "");
+  const formRecipients = [...new Set($('input[name="dmformsendto"]').map((_, i) => ($(i).attr("value") || "").split(/[,;\s]+/)).get().flat().map((x) => String(x).trim().toLowerCase()).filter((x) => /@/.test(x)))];
   $(SKIP).remove();
+  // Text on separate lines / in separate blocks must not run together ("APR.</p><p>See" is "APR. See", not "APR.See")
+  $("br").replaceWith(" ");
+  $("p,div,li,h1,h2,h3,h4,h5,h6,td,th,tr,section,article,header,footer,ul,ol,dt,dd,address,blockquote,figcaption,label,button,option").each((_, el) => { $(el).append(" "); });
 
   const isGlobal = (el: Element) => $(el).closest(GLOBAL_SEL).length > 0;
 
@@ -234,14 +249,21 @@ export function extract(url: string, finalUrl: string, status: number, html: str
     });
   });
 
+  const bookButtons: BookButton[] = [];
+  $(BOOK_BTN).each((_, el) => {
+    const href = $(el).attr("href");
+    bookButtons.push({ selector: selectorFor($, el as Element), href: href === undefined ? null : href.trim(), text: clean($(el).text()) || clean($(el).attr("aria-label") || ""), global: isGlobal(el as Element) });
+  });
+
   const links: Link[] = [];
   $("a").each((_, a) => {
     if ($(a).attr("href") === undefined) return; // Duda buttons wired to popups/booking widgets have no href
+    if ($(a).is(BOOK_BTN) || $(a).closest(BOOK_BTN).length) return; // checked separately (bookButtons)
     const href = ($(a).attr("href") || "").trim();
     let abs = href;
     try { abs = new URL(href, finalUrl).toString(); } catch { /* keep */ }
     links.push({ href, abs, text: clean($(a).text()) || clean($(a).attr("aria-label") || ""), selector: selectorFor($, a), global: isGlobal(a) });
   });
 
-  return { url, finalUrl, status, title, metaDescription, h1s: headings.filter((h) => h.level === 1).map((h) => h.text), headings, blocks, images, links, html: "" };
+  return { url, finalUrl, status, title, metaDescription, h1s: headings.filter((h) => h.level === 1).map((h) => h.text), headings, blocks, images, links, html: "", formRecipients, bookButtons };
 }

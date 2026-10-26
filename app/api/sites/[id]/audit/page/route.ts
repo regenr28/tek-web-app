@@ -4,7 +4,7 @@ import { idOf, type Ctx } from "@/lib/http";
 import { parseBody, rateLimit } from "@/lib/security";
 import { auditOne } from "@/lib/audit";
 
-export const maxDuration = 60;
+export const maxDuration = 120; // each page opens in Chrome three times (desktop, tablet, mobile)
 const Body = z.object({ runId: z.number().int().positive(), url: z.string().max(2000), from: z.string().max(500).nullish() });
 
 export const POST = handle(async (req: Request, ctx: Ctx) => {

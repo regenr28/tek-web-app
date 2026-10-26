@@ -17,7 +17,13 @@ const securityHeaders = [
 const nextConfig: NextConfig = {
   poweredByHeader: false,
   productionBrowserSourceMaps: false,
-  serverExternalPackages: ["@libsql/client", "unpdf"],
+  serverExternalPackages: ["@libsql/client", "unpdf", "@sparticuz/chromium", "puppeteer-core"],
+  // headless Chrome (rendered audits + finding screenshots) needs its compressed binary shipped with these functions
+  outputFileTracingIncludes: {
+    // ("[id]" would be read as a glob character class, so match the routes with wildcards)
+    "/api/sites/*/audit/page": ["./node_modules/@sparticuz/chromium/bin/**"],
+    "/api/findings/*/shot": ["./node_modules/@sparticuz/chromium/bin/**"],
+  },
   async headers() {
     return [
       { source: "/:path*", headers: securityHeaders },

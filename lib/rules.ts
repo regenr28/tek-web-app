@@ -60,7 +60,19 @@ const SOCIAL_HOSTS: Record<string, RegExp> = {
   tiktok: /(^|\.)tiktok\.com$/i, google: /(^|\.)(google\.[a-z.]+|g\.page|goo\.gl|maps\.app\.goo\.gl)$/i,
 };
 
-const normUrl = (u: string) => u.toLowerCase().replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/[?#].*$/, "").replace(/\/+$/, "");
+const normUrl = (u: string) => u.toLowerCase().replace(/^https?:\/\//, "").replace(/^(www|m|web|business)\./, "").replace(/[?#].*$/, "").replace(/\/+$/, "");
+/**
+ * Same social profile? Facebook writes one page several ways — /p/Name-123…, /people/Name/123…, /pages/Name/123…,
+ * /profile.php?id=123… — so pages with the same numeric ID are the same page. Otherwise compare the handle.
+ */
+export function sameSocial(a: string, b: string) {
+  if (normUrl(a) === normUrl(b)) return true;
+  const fbId = (u: string) => u.match(/[?&]id=(\d{6,})/)?.[1] || u.replace(/[?#].*$/, "").replace(/\/+$/, "").match(/[-/](\d{8,})$/)?.[1] || "";
+  const ia = fbId(a), ib = fbId(b);
+  if (ia && ia === ib) return true;
+  const handle = (u: string) => { try { const x = new URL(u); return `${x.hostname.replace(/^(www|m|web|business)\./, "")}/${x.pathname.split("/").filter(Boolean).filter((p) => !/^(p|pages|people)$/i.test(p))[0] || ""}`.toLowerCase(); } catch { return u; } };
+  return handle(a) === handle(b) && !handle(a).endsWith("/");
+}
 const normName = (s: string) => s.toLowerCase().replace(/[’']/g, "'").replace(/[^a-z0-9' ]/g, " ").replace(/\s+/g, " ").trim();
 
 function lev(a: string, b: string) {
@@ -204,11 +216,17 @@ export function auditPage(p: PageData, path: string, facts: Facts): Finding[] {
       if (!path && platform !== "google")
         add(l, { category: "Links", severity: "error", rule: "social-generic", message: `${cap(platform)} link points to the generic homepage, not the client's profile`, found: l.abs });
       const expected = facts.socials.filter((s) => s.platform.toLowerCase() === platform || SOCIAL_HOSTS[s.platform.toLowerCase()]?.test(host));
-      if (expected.length && path && !expected.some((s) => normUrl(s.url) === normUrl(l.abs)))
+      if (expected.length && path && !expected.some((s) => sameSocial(s.url, l.abs)))
         add(l, { category: "Links", severity: "error", rule: "social-mismatch", message: `${cap(platform)} link doesn't match Jira`, found: l.abs, expected: expected.map((s) => s.url).join(", ") });
       break;
     }
     if (/^http:\/\//i.test(h)) add(l, { category: "Links", severity: "info", rule: "insecure-link", message: "Link uses http:// instead of https://", found: h });
+  }
+
+  // ---------- ShopGenie "Book appointment" buttons: custom button, opens the booking widget — must have no href ----------
+  for (const bb of p.bookButtons || []) {
+    if (bb.href !== null)
+      add(bb, { category: "Links", severity: "error", rule: "book-btn-href", message: "ShopGenie booking button (.shopgenie-book-appt-bt) has a link — remove the href so it opens the booking widget", found: `${bb.text || "(button)"} → ${bb.href || '(empty href="")'}` });
   }
 
   // ---------- images ----------
@@ -284,8 +302,12 @@ export function sitewide(pages: { path: string; url: string; data: PageData }[],
 
   for (const ph of facts.phones) if (digits(ph).length === 10 && !allDigits.has(digits(ph)))
     out.push({ ...site, category: "Contact info", severity: "warning", rule: "fact-phone-absent", message: "Jira phone number not found anywhere on the site", expected: formatPhone(ph) });
-  for (const e of facts.emails) if (!allText.toLowerCase().includes(e.toLowerCase()) && !pages.some((p) => p.data.links.some((l) => l.href.toLowerCase().includes(e.toLowerCase()))))
-    out.push({ ...site, category: "Contact info", severity: "warning", rule: "fact-email-absent", message: "Jira email not found anywhere on the site", expected: e });
+  const recipients = new Set(pages.flatMap((p) => p.data.formRecipients || []));
+  for (const e of facts.emails) if (!allText.toLowerCase().includes(e.toLowerCase()) && !recipients.has(e.toLowerCase()) && !pages.some((p) => p.data.links.some((l) => l.href.toLowerCase().includes(e.toLowerCase()))))
+    out.push({ ...site, category: "Contact info", severity: "warning", rule: "fact-email-absent", message: "Jira email isn't shown on the site and no contact form sends to it", expected: e });
+  // contact forms (hidden "dmformsendto") should send to the shop's email
+  if (facts.emails.length) for (const r of recipients) if (!facts.emails.some((e) => e.toLowerCase() === r))
+    out.push({ ...site, category: "Contact info", severity: "warning", rule: "form-recipient-mismatch", message: "A contact form sends to an email that isn't in Jira", found: r, expected: facts.emails.join(", ") });
   if (facts.businessName && !allTextNorm.includes(normName(facts.businessName)))
     out.push({ ...site, category: "Business name", severity: "error", rule: "fact-name-absent", message: "Business name from Jira never appears on the site", expected: facts.businessName });
   const allStreetNorm = normStreet(allText);
@@ -296,7 +318,7 @@ export function sitewide(pages: { path: string; url: string; data: PageData }[],
       out.push({ ...site, category: "Contact info", severity: "warning", rule: "fact-zip-absent", message: "Jira ZIP code not found on the site", expected: `${l.city}, ${l.state} ${l.zip}` });
   }
   for (const s of facts.socials) {
-    if (!pages.some((p) => p.data.links.some((l) => normUrl(l.abs) === normUrl(s.url))))
+    if (!pages.some((p) => p.data.links.some((l) => sameSocial(l.abs, s.url))))
       out.push({ ...site, category: "Links", severity: "warning", rule: "fact-social-absent", message: `Jira ${s.platform} link isn't linked anywhere`, expected: s.url });
   }
   for (const s of facts.services) {

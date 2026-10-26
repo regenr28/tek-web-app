@@ -68,7 +68,7 @@ export default function SiteView({ id, me }: { id: number; me: Me }) {
 
       {err && <div className="alert error" onClick={() => setErr("")}>{err}</div>}
 
-      {tab === "findings" && <AuditPanel site={site} lastRun={data.lastRun} aiAvailable={data.ai} onDone={load} onError={setErr} />}
+      {tab === "findings" && <AuditPanel site={site} lastRun={data.lastRun} aiAvailable={data.ai} onDone={load} onError={setErr} canManage={me.role !== "member"} />}
 
       {tab === "findings" && <div className="row">
         <div className="stat"><b style={{ color: "var(--error)" }}>{open.filter((f) => f.severity === "error").length}</b><span>Errors</span></div>
@@ -100,7 +100,14 @@ export default function SiteView({ id, me }: { id: number; me: Me }) {
 
 // ---------------- Audit runner ----------------
 
-function AuditPanel({ site, lastRun, aiAvailable, onDone, onError }: { site: Site; lastRun: Run | null; aiAvailable: boolean; onDone: () => void; onError: (s: string) => void }) {
+function AuditPanel({ site, lastRun, aiAvailable, onDone, onError, canManage }: { site: Site; lastRun: Run | null; aiAvailable: boolean; onDone: () => void; onError: (s: string) => void; canManage: boolean }) {
+  const [skip, setSkip] = useState<string[] | null>(null);
+  const [editSkip, setEditSkip] = useState<string | null>(null);
+  useEffect(() => { api<{ ignorePaths: string[] }>("/api/settings/audit").then((r) => setSkip(r.ignorePaths)).catch(() => setSkip([])); }, []);
+  const saveSkip = async () => {
+    try { const r = await api<{ ignorePaths: string[] }>("/api/settings/audit", { method: "PUT", body: { ignorePaths: (editSkip || "").split(/[\n,]+/).map((x) => x.trim()).filter(Boolean) } }); setSkip(r.ignorePaths); setEditSkip(null); }
+    catch (e) { onError((e as Error).message); }
+  };
   const [opts, setOpts] = useState({ aiCopy: aiAvailable, aiAlt: aiAvailable, aiGlobal: true, maxPages: 60 });
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState({ done: 0, total: 0, phase: "" });
@@ -116,9 +123,9 @@ function AuditPanel({ site, lastRun, aiAvailable, onDone, onError }: { site: Sit
     try {
       setProgress({ done: 0, total: 1, phase: "Discovering pages" });
       add("Discovering pages from the preview link…");
-      const s = await api<{ runId: number; pages: { url: string; path: string; from?: string }[]; errors: string[] }>(`/api/sites/${site.id}/audit/start`, { body: { ai, maxPages: opts.maxPages } });
+      const s = await api<{ runId: number; pages: { url: string; path: string; from?: string }[]; errors: string[]; skipped?: string[] }>(`/api/sites/${site.id}/audit/start`, { body: { ai, maxPages: opts.maxPages } });
       s.errors.forEach((e) => add("⚠ " + e));
-      add(`Found ${s.pages.length} page(s).`);
+      add(`Found ${s.pages.length} page(s)${s.skipped?.length ? ` · skipped ${s.skipped.join(", ")}` : ""}. Each page is opened in real Chrome on desktop, tablet and mobile.`);
       const aiSteps = (opts.aiCopy ? 1 : 0) + (opts.aiAlt ? 1 : 0);
       const total = s.pages.length * (1 + aiSteps) + 1;
       let done = 0;
@@ -130,9 +137,9 @@ function AuditPanel({ site, lastRun, aiAvailable, onDone, onError }: { site: Sit
         while (queue.length && !cancel.current) {
           const p = queue.shift()!;
           try {
-            const r = await api<{ pageId?: number; findings: number; error?: string }>(`/api/sites/${site.id}/audit/page`, { body: { runId: s.runId, url: p.url, from: p.from } });
+            const r = await api<{ pageId?: number; findings: number; error?: string; note?: string }>(`/api/sites/${site.id}/audit/page`, { body: { runId: s.runId, url: p.url, from: p.from } });
             if (r.pageId) pageIds.push({ id: r.pageId, path: p.path });
-            add(`${p.path} — ${r.error ? "✗ " + r.error : r.findings + " finding(s)"}`);
+            add(`${p.path} — ${r.error ? "✗ " + r.error : r.findings + " finding(s)"}${r.note ? ` · ⚠ ${r.note}` : ""}`);
           } catch (e) { add(`${p.path} — ✗ ${(e as Error).message}`); }
           tick("Checking pages");
         }
@@ -193,6 +200,16 @@ function AuditPanel({ site, lastRun, aiAvailable, onDone, onError }: { site: Sit
         </div>
       </div>
       {!aiAvailable && <div className="muted small">AI checks are off — a Super Admin can add a free Gemini / Groq / OpenRouter key in Settings.</div>}
+      <div className="row small" style={{ gap: 6 }}>
+        <span className="muted">Pages every audit skips:</span>
+        {editSkip === null ? <>
+          <b>{skip === null ? "…" : skip.length ? skip.join(", ") : "none"}</b>
+          {canManage && <button className="sm ghost" onClick={() => setEditSkip((skip || []).join(", "))}>Edit</button>}
+        </> : <>
+          <input value={editSkip} onChange={(e) => setEditSkip(e.target.value)} placeholder="/image-credits, /privacy-policy" style={{ width: 320 }} />
+          <button className="sm primary" onClick={saveSkip}>Save</button><button className="sm ghost" onClick={() => setEditSkip(null)}>Cancel</button>
+        </>}
+      </div>
       {(running || log.length > 0) && (
         <>
           <div className="row small"><b>{progress.phase}</b><span className="muted">{pct}%</span></div>
@@ -221,6 +238,21 @@ function FindingsTable({ siteId, findings, members, me, reload, onError }: { sit
   const [sel, setSel] = useState<Set<number>>(new Set());
   const [local, setLocal] = useState<Record<number, Partial<Finding>>>({});
   const [copied, setCopied] = useState<number | null>(null);
+  const [shot, setShot] = useState<{ id: number; title: string; url?: string; found?: boolean; err?: string } | null>(null);
+  const [edCopied, setEdCopied] = useState<number | null>(null);
+  async function showShot(r: Finding) {
+    setShot({ id: r.id, title: r.message });
+    try {
+      const res = await fetch(`/api/findings/${r.id}/shot`);
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `HTTP ${res.status}`);
+      const url = URL.createObjectURL(await res.blob());
+      setShot((x) => (x && x.id === r.id ? { ...x, url, found: res.headers.get("X-Element-Found") === "1" } : x));
+    } catch (e) { setShot((x) => (x && x.id === r.id ? { ...x, err: (e as Error).message } : x)); }
+  }
+  const copyForEditor = (r: Finding) => {
+    navigator.clipboard.writeText("TEKFIND:" + JSON.stringify({ s: r.selector || "", t: (r.found || "").split(" — alt:")[0].split(" → ")[0].slice(0, 120), p: r.page_path }));
+    setEdCopied(r.id); setTimeout(() => setEdCopied(null), 1500);
+  };
 
   const rows = useMemo(() => findings.map((x) => ({ ...x, ...local[x.id] })), [findings, local]);
   const cats = [...new Set(rows.map((r) => r.category))].sort();
@@ -271,6 +303,22 @@ function FindingsTable({ siteId, findings, members, me, reload, onError }: { sit
         <a className="btn sm" href={`/api/sites/${siteId}/export?all=1`}>Export all</a>
       </div>
 
+      <EditorFinder />
+
+      {shot && (
+        <div className="modal-back" onClick={() => setShot(null)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.55)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+          <div className="card stack" onClick={(e) => e.stopPropagation()} style={{ maxWidth: "min(1400px, 96vw)", maxHeight: "94vh", overflow: "auto" }}>
+            <div className="row between"><b>{shot.title}</b><button className="sm ghost" onClick={() => setShot(null)}>✕</button></div>
+            {shot.err ? <div className="alert error">{shot.err}</div>
+              : !shot.url ? <p className="muted">Opening the page in Chrome and finding the spot… (about 10 seconds)</p>
+              : <>
+                {!shot.found && <div className="alert warning small">Couldn&apos;t find the exact element on the page now (it may have been fixed) — showing the page.</div>}
+                <img src={shot.url} alt="Page screenshot with the finding outlined in red" style={{ maxWidth: "100%", border: "1px solid var(--border)", borderRadius: 6 }} />
+              </>}
+          </div>
+        </div>
+      )}
+
       {sel.size > 0 && (
         <div className="row alert">
           <b>{sel.size} selected</b>
@@ -313,6 +361,12 @@ function FindingsTable({ siteId, findings, members, me, reload, onError }: { sit
                           {r.expected && <><span className="k">Expected</span><span className="expected">{r.expected}</span></>}
                         </div>
                       )}
+                      {r.page_url && (
+                        <div className="row" style={{ gap: 6, marginTop: 4 }}>
+                          <button className="sm" onClick={() => showShot(r)} title="See it on the page — screenshot with the spot outlined">👁 Show on page</button>
+                          <button className="sm ghost" onClick={() => copyForEditor(r)} title="Copy, then click “Tek: find it” in your bookmarks while the Duda editor or preview is open">{edCopied === r.id ? "✓ Copied — click “Tek: find it”" : "📍 Find in editor"}</button>
+                        </div>
+                      )}
                       {r.selector && (
                         <div className="selector" title="Click to copy CSS selector" onClick={() => { navigator.clipboard.writeText(r.selector!); setCopied(r.id); setTimeout(() => setCopied(null), 1200); }}>
                           {copied === r.id ? "✓ copied" : r.selector}
@@ -344,6 +398,28 @@ function FindingsTable({ siteId, findings, members, me, reload, onError }: { sit
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * "Tek: find it" bookmarklet. Copy a finding ("📍 Find in editor"), then click the bookmark while the Duda editor or the
+ * preview is open: it scrolls to the element and outlines it in red. It only reads what you copied; it sends nothing anywhere.
+ */
+const FINDER = `(async()=>{let t='';try{t=await navigator.clipboard.readText()}catch(e){}if(!/^TEKFIND:/.test(t))t=prompt('Tek: paste the finding you copied (📍 Find in editor):')||'';if(!/^TEKFIND:/.test(t))return;let f;try{f=JSON.parse(t.slice(8))}catch(e){return alert('Tek: that copy is not a finding.')}const docs=[document];const add=w=>{try{w.document.querySelectorAll('iframe').forEach(i=>{try{if(i.contentDocument){docs.push(i.contentDocument);add(i.contentWindow)}}catch(e){}})}catch(e){}};add(window);const vis=e=>{const r=e.getBoundingClientRect();return r.width>0&&r.height>0};let el=null;for(const d of docs){let c=null;try{if(f.s&&f.s!=='head')c=d.querySelector(f.s)}catch(e){}if(c&&vis(c)){el=c;break}if(f.t){const tt=f.t.replace(/…/g,'').trim().slice(0,50).toLowerCase();c=[...d.querySelectorAll('p,h1,h2,h3,h4,h5,h6,li,a,span,img,button,div')].find(e=>vis(e)&&((e.textContent||'').toLowerCase().includes(tt)||(e.src||'').toLowerCase().includes(tt))&&![...e.children].some(k=>(k.textContent||'').toLowerCase().includes(tt)));if(c){el=c;break}}}if(!el)return alert('Tek: not on this page. Open '+f.p+' in the editor/preview, then click again.');el.scrollIntoView({block:'center'});const o=el.style.outline,oo=el.style.outlineOffset;el.style.outline='4px solid #e11d48';el.style.outlineOffset='3px';setTimeout(()=>{el.style.outline=o;el.style.outlineOffset=oo},10000)})()`;
+
+function EditorFinder() {
+  const ref = useRef<HTMLAnchorElement>(null);
+  // React won't render a javascript: link, so set it after mount
+  useEffect(() => { ref.current?.setAttribute("href", "javascript:" + encodeURIComponent(FINDER)); }, []);
+  return (
+    <details className="small">
+      <summary>📍 Jump to a finding inside the Duda editor (one-time setup)</summary>
+      <div className="stack" style={{ gap: 6, marginTop: 6 }}>
+        <div>1. Drag this button to your browser&apos;s bookmarks bar: <a ref={ref} className="btn sm" onClick={(e) => e.preventDefault()} title="Drag me to the bookmarks bar">Tek: find it</a></div>
+        <div>2. On a finding, click <b>📍 Find in editor</b> (it copies the spot).</div>
+        <div>3. In the Duda editor (or the preview), open that page and click <b>Tek: find it</b> in your bookmarks — it scrolls to the spot and outlines it in red. The first time, Chrome may ask to allow reading the clipboard; if not allowed, just paste when it asks.</div>
+      </div>
+    </details>
   );
 }
 

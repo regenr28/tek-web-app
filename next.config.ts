@@ -23,6 +23,10 @@ const nextConfig: NextConfig = {
     // ("[id]" would be read as a glob character class, so match the routes with wildcards)
     "/api/sites/*/audit/page": ["./node_modules/@sparticuz/chromium/bin/**"],
     "/api/findings/*/shot": ["./node_modules/@sparticuz/chromium/bin/**"],
+    // research reads a website's social icons in Chrome when they're added with script
+    "/api/sites/*/collection/job": ["./node_modules/@sparticuz/chromium/bin/**"],
+    "/api/sites/*/collection/run": ["./node_modules/@sparticuz/chromium/bin/**"],
+    "/api/jobs/*/continue": ["./node_modules/@sparticuz/chromium/bin/**"],
   },
   async headers() {
     return [

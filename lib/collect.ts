@@ -224,6 +224,18 @@ export function newLocation(): Loc {
   return { city: "", state: "", tekmetricId: "", fields: Object.fromEntries(LOC_FIELDS.map((f) => [f.key, F()])) as Record<LocKey, CField> };
 }
 
+/**
+ * Jira's address as one line: "The Auto Connection\n\n2037 P st.\n\nLincoln, Ne. 68503" → "2037 P st., Lincoln, NE 68503"
+ * (a business-name line before the street is dropped; "Ne." before the ZIP becomes "NE").
+ */
+export function cleanJiraAddress(raw: string): string {
+  let lines = raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const firstStreet = lines.findIndex((l) => /^\d/.test(l));
+  if (firstStreet > 0 && lines.slice(0, firstStreet).every((l) => !/\d/.test(l))) lines = lines.slice(firstStreet);
+  return stripCountry(lines.join(", ").replace(/,\s*,/g, ",").replace(/\s+,/g, ","))
+    .replace(/,\s*([A-Za-z]{2})\.?\s+(\d{5}(?:-\d{4})?)\s*$/, (_, st: string, zip: string) => `, ${st.toUpperCase()} ${zip}`);
+}
+
 export const stripCountry = (a: string) => a.replace(/,?\s*(USA|U\.S\.A|United States( of America)?|US|Canada)\.?\s*$/i, "").trim();
 
 // ---------- Jira answers that are instructions, not content ----------
@@ -280,7 +292,8 @@ export function applyJiraInstructions(c: Collection, raw: { about?: string; coup
 
 export function websiteUrl(raw: string) {
   const s = raw.trim().split(/\s+/)[0];
-  if (!s || !/\./.test(s)) return "";
+  // "www.autorepairlincoln@gmail.com" is an email address, not a website
+  if (!s || !/\./.test(s) || /@/.test(s.replace(/^https?:\/\//i, "").split("/")[0])) return "";
   const host = s.replace(/^https?:\/\//i, "").replace(/\/.*$/, "").toLowerCase();
   return `https://${host.startsWith("www.") || host.split(".").length > 2 ? host : "www." + host}/`;
 }
@@ -325,7 +338,7 @@ export function fromJira(jira: JiraProject, f: JiraFields, opts: { minAmenities:
 
   const rawAddr = pick(f, /^Shop Address$/i, /mailing address/i);
   const loc = parseCityState(rawAddr);
-  set("address", F(stripCountry(rawAddr), "jira", rawAddr ? "review" : "missing", rawAddr ? "From Jira — replace with the exact GBP address." : "No shop address in Jira."));
+  set("address", F(cleanJiraAddress(rawAddr), "jira", rawAddr ? "review" : "missing", rawAddr ? "From Jira — replace with the exact GBP address." : "No shop address in Jira."));
   set("cityState", F(loc.city && loc.state ? `${loc.city}, ${loc.state}` : "", "jira", loc.city ? "review" : "missing"));
 
   const phoneRaw = pick(f, /^Shop Phone Number$/i, /phone/i);
@@ -347,8 +360,10 @@ export function fromJira(jira: JiraProject, f: JiraFields, opts: { minAmenities:
   set("hours", F(hours, "jira", hours ? "review" : "missing", hours ? "Jira is the source of truth — formatting and GBP comparison happen during research." : "No hours in Jira."));
 
   const existing = /yes/i.test(pick(f, /^Existing Website$/i)) || !!pick(f, /^Current Website$/i);
-  const cur = websiteUrl(pick(f, /^Current Website$/i));
+  const curRaw = pick(f, /^Current Website$/i).trim();
+  const cur = websiteUrl(curRaw);
   if (existing && cur) set("existingWebsite", F(cur, "jira", "review", "Check it isn't outdated or from a previous brand."));
+  else if (curRaw && /@/.test(curRaw)) set("existingWebsite", F("", "jira", "review", `Jira's "Current Website" answer is an email address (${curRaw.slice(0, 80)}), not a website — research uses the website on their GBP once it proves to be theirs (their phone / address on it).`));
 
   const dom = pick(f, /what is that domain/i);
   if (dom) set("domain", F(domainOf(dom), "jira"));

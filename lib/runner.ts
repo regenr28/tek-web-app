@@ -6,6 +6,7 @@ import { applyJiraInstructions, repairJiraFields } from "./collect";
 import { STEPS, stepGbp, stepWebsite, stepSearch, stepPrograms, stepCrossCheck, stepAi, stepReview, type StepId } from "./research";
 import { HttpError } from "./security";
 import { generateHomepage } from "./homepage";
+import { studyJira } from "./studyjira";
 
 /**
  * Research runs on the server as a "job", so it keeps going when the person leaves the page or closes the tab.
@@ -47,7 +48,11 @@ export async function runStep(siteId: number, step: JobStep): Promise<{ ok: bool
     else if (step === "search") summary = await stepSearch(c, ev, raw);
     else if (step === "programs") summary = await stepPrograms(c, ev);
     else if (step === "check") summary = await stepCrossCheck(c, ev, raw);
-    else if (step === "ai") summary = await stepAi(c, ev, raw);
+    else if (step === "ai") {
+      // the AI reads the whole Jira (every answer + the full payload) first, for facts written in an unexpected place
+      const studied = await studyJira(c, p.jira.fields).catch((e) => `couldn't read the Jira with AI (${(e as Error).message.slice(0, 80)})`);
+      summary = `${await stepAi(c, ev, raw)}${studied ? ` · ${studied}` : ""}`;
+    }
     else summary = await stepReview(c, raw);
   } catch (e) { ok = false; summary = (e as Error).message.slice(0, 300); }
   // Did the person edit something while the step was running? Their edit wins.

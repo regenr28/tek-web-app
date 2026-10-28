@@ -1,8 +1,9 @@
 import { one, run } from "./db";
 import { HttpError } from "./security";
 import { parseJiraXlsx, toProject, pick, applyPayload, applyDescription, type JiraFields, type JiraProject } from "./jira";
-import { fromJira, normalizeCollection, applyRules, fillCityState, toFacts, jiraSocialLinks, type Collection, FIELDS } from "./collect";
+import { fromJira, normalizeCollection, applyRules, fillCityState, toFacts, jiraSocialLinks, type Collection, FIELDS, JIRA_READ_VERSION } from "./collect";
 import type { Evidence } from "./research";
+import { studyJira } from "./studyjira";
 
 // ---------- template rules (how many amenities a template needs) ----------
 
@@ -66,22 +67,32 @@ export async function loadProject(id: number) {
       return { url, loc: Math.max(0, i) };
     });
   }
-  // Projects imported before the new Jira form was understood: read its "Duda Payload" now and fill only the blanks
-  if (jira && (jira.fields["Duda Payload"] || []).length && !collection.payloadRead) {
+  // Projects read by an older version of the Jira reader (before the "Duda Payload" was understood, before every payload
+  // key and facts written under Amenities were read): read the stored export again and fill only the blanks
+  const hasPayload = !!jira && (jira.fields["Duda Payload"] || []).length > 0;
+  if (jira && (collection.readVersion || 0) < JIRA_READ_VERSION && (hasPayload || collection.readVersion === undefined)) {
     try {
       const fields: JiraFields = { ...jira.fields };
-      applyPayload(fields); applyDescription(fields);
+      if (hasPayload) applyPayload(fields);
+      applyDescription(fields);
       const project = toProject(fields, jira.project.activity || []);
       const draft = fromJira(project, fields, { minAmenities: collection.minAmenities });
       for (const f of FIELDS) {
         const cur = collection.fields[f.key], nf = draft.fields[f.key];
         if (cur.manual || !nf.value.trim()) continue;
+        // "All Makes and Models" (the default) → the Jira makes, or "… EXCEPT heavy diesel trucks" from "Vehicles Not Serviced"
         const replaceRule = f.key === "vehicles" && cur.source === "rule" && nf.source === "jira";
-        if (!cur.value.trim() || replaceRule) collection.fields[f.key] = nf;
+        const addExcept = f.key === "vehicles" && !cur.manual && /EXCEPT/.test(nf.value) && !/EXCEPT/i.test(cur.value) && ["rule", "jira"].includes(cur.source);
+        // the job-applications email was a fallback (public / primary email) and the Jira really has one (e.g. careers_email)
+        const replaceEmail = f.key === "email" && /No job-applications email in Jira/.test(cur.note) && !/No job-applications email in Jira/.test(nf.note);
+        // certifications from Jira grew (e.g. the ones listed under Amenities) — keep what was there, add the new ones
+        const growCerts = f.key === "certifications" && cur.source === "jira" && nf.source === "jira" && nf.value.length > cur.value.length;
+        if (!cur.value.trim() || replaceRule || addExcept || replaceEmail || growCerts) collection.fields[f.key] = nf;
       }
       if (!collection.pages.length) collection.pages = project.pages;
       collection.jiraSocials = draft.jiraSocials;
-      collection.payloadRead = true;
+      collection.payloadRead = hasPayload || !!collection.payloadRead;
+      collection.readVersion = JIRA_READ_VERSION;
       await run("UPDATE sites SET collection_json = ?, jira_json = ?, template = COALESCE(NULLIF(?, ''), template), updated_at = datetime('now') WHERE id = ?",
         [JSON.stringify(collection), JSON.stringify({ fields, project }), project.template, id]);
     } catch { /* leave the project as it was */ }
@@ -112,6 +123,10 @@ export async function importJira(buf: Uint8Array, userId: number) {
   const rules = await getTemplateRules();
   const draft = fromJira(project, fields, { minAmenities: amenitiesFor(project.template, rules) });
   draft.minServices = rules.defaultServices;
+  // the AI reads the whole Jira (every answer + the full payload) for facts written in an unexpected place — best effort
+  const studied = await Promise.race([studyJira(draft, fields), new Promise<string>((ok) => setTimeout(() => ok("AI took too long — it reads the Jira again in the AI step"), 45_000))])
+    .catch((e) => `couldn't read the Jira with AI (${(e as Error).message.slice(0, 80)})`);
+  if (studied) draft.research.jira = { at: new Date().toISOString(), ok: !/couldn't|too long/.test(studied), summary: studied };
 
   const existing = project.key ? await one<{ id: number; collection_json: string | null; editor_url: string | null; preview_url: string }>(
     "SELECT id, collection_json, editor_url, preview_url FROM sites WHERE jira_key = ?", [project.key]) : null;

@@ -2,6 +2,7 @@ import areaCodes from "./areaCodes.json";
 import type { JiraFields, JiraProject } from "./jira";
 import { pick, pickAll } from "./jira";
 import { emptyFacts, parseHours, type Facts } from "./facts";
+import { warrantyTerms } from "./warranty";
 
 /**
  * "Data Collection" — the same fields, labels and order as the Shopgenie/Tekmetric guideline sheet.
@@ -69,6 +70,8 @@ export type Collection = {
   jiraSocials?: { url: string; loc: number }[];
   /** the new Jira form's "Duda Payload" has been read into this collection */
   payloadRead?: boolean;
+  /** which version of the Jira reader filled this collection (older ones are re-read once, blanks only) */
+  readVersion?: number;
   locations: Loc[];
   fields: Record<FieldKey, CField>;
   pages: string[];
@@ -329,6 +332,53 @@ export function jiraGbpLink(f: JiraFields): string {
   return splitLines(pick(f, /^Social Links$/i)).map((s) => s.match(/https?:\/\/\S+/i)?.[0] || "").find((u) => u && isGoogleLink(u)) || "";
 }
 
+/** Certification / affiliation wording ("AAA Approved Auto Repair", "ASE Certified Technicians", "BBB A+ Rated", "NAPA Gold Approved…"). */
+const CERT_LINE = /\b(ASE|AAA|NAPA|BBB|Bosch|AC ?Delco|I-?CAR|TechNet|Carfax|RepairPal|AMSOIL|Motorcraft|Mopar|ATRA|ASA|ASCCA|Blue Seal|certified|certification|accredited|approved auto repair|member of)\b/i;
+const FINANCE_LINE = /\bfinanc|\b(affirm|synchrony|snap finance|klarna|acima|sunbit|koalafi|afterpay|wisetack|easypay)\b/i;
+
+/**
+ * Facts written in the "wrong" Jira answer: a warranty or certification listed under Amenities, financing in the About
+ * text… Copied into the right field (Jira values in that field always win), each with a note saying where it was found.
+ */
+/** Bump when the Jira reader learns something new: projects read by an older version are re-read once (blanks only). */
+export const JIRA_READ_VERSION = 3;
+
+export function applyHiddenFacts(c: Collection, src: { amenities: string[]; about: string; faq: string; notes: string }) {
+  const places: [string, string[]][] = [["Amenities", src.amenities], ["About Us", splitLines(src.about)], ["FAQ", splitLines(src.faq)], ["the Jira notes / payload", splitLines(src.notes)]];
+  const w = c.fields.warranties;
+  if (!w.value.trim() && !w.manual) {
+    for (const [where, lines] of places) {
+      const hit = lines.map((l) => ({ l, t: warrantyTerms(l) })).find((x) => x.t) || lines.map((l) => ({ l, t: null })).find((x) => /warrant|guarantee/i.test(x.l) && x.l.length <= 160);
+      if (!hit) continue;
+      w.value = hit.t ? hit.t.value : titleCase(hit.l); w.source = "jira"; w.status = "review";
+      w.note = joinNote(w.note.split("\n").filter((x) => !/^No warranty in Jira/.test(x)).join("\n"), `From Jira's ${where}: “${hit.l}” — the warranty was written there. Confirm the terms.`);
+      break;
+    }
+  }
+  const cf = c.fields.certifications;
+  if (!cf.manual) {
+    const have = splitLinesKeep(cf.value);
+    const add: { line: string; where: string }[] = [];
+    for (const [where, lines] of places.slice(0, 1)) for (const l of lines) if (CERT_LINE.test(l) && l.length <= 80 && !/warrant|review|star/i.test(l) && !have.concat(add.map((a) => a.line)).some((h) => h.toLowerCase() === l.toLowerCase())) add.push({ line: titleCase(l), where });
+    if (add.length) {
+      // a short name already listed ("AAA") is replaced by the full wording from Jira ("AAA Approved Auto Repair")
+      const keep = have.filter((h) => !add.some((a) => a.line.toLowerCase().includes(h.toLowerCase()) && h.length < a.line.length));
+      cf.value = uniqLines([...keep, ...add.map((a) => a.line)]).join("\n"); cf.source = "jira"; cf.status = "review";
+      cf.note = joinNote(cf.note.split("\n").filter((x) => !/^No certifications in Jira/.test(x)).join("\n"), `From Jira's Amenities: ${add.map((a) => a.line).join(", ")} — certifications listed there.`);
+    }
+  }
+  const fin = c.fields.financing;
+  if (!fin.value.trim() && !fin.manual) {
+    for (const [where, lines] of places) {
+      const l = lines.find((x) => FINANCE_LINE.test(x) && x.length <= 240);
+      if (!l) continue;
+      fin.value = l; fin.source = "jira"; fin.status = "review";
+      fin.note = joinNote(fin.note.split("\n").filter((x) => !/^Financing page requested/.test(x)).join("\n"), `From Jira's ${where} — financing was written there.`);
+      break;
+    }
+  }
+}
+
 export function fromJira(jira: JiraProject, f: JiraFields, opts: { minAmenities: number; editorUrl?: string }): Collection {
   const c = emptyCollection();
   c.minAmenities = opts.minAmenities;
@@ -380,13 +430,18 @@ export function fromJira(jira: JiraProject, f: JiraFields, opts: { minAmenities:
   set("services", F(services.join("\n"), "jira", services.length >= c.minServices ? "ok" : "review",
     services.length < c.minServices ? `Only ${services.length} service(s) provided — need at least ${c.minServices}. Research will look for more.` : ""));
 
-  const excludes = /yes/i.test(pick(f, /types of vehicles you do not service/i));
-  const notServiced = pick(f, /vehicles not serviced/i);
+  // Vehicles they DON'T service: whatever is written in "Vehicles Not Serviced" counts, even when the yes/no question
+  // above it was answered "No" or left empty (the text answer is the fact; the mismatch is noted for review)
+  const excludesAnswer = pick(f, /types of vehicles you do not service/i);
+  const notServicedRaw = pick(f, /vehicles not serviced/i).replace(/\s+/g, " ").trim();
+  const notServiced = /^(n\/?a|none|no|nope|nothing|-+|\.)$/i.test(notServicedRaw) ? "" : notServicedRaw;
   const makes = pick(f, /^Vehicles Serviced \(Makes\)$/i);
+  const saysNo = !!notServiced && !!excludesAnswer && !/yes/i.test(excludesAnswer);
+  const exceptNote = notServiced ? `Jira's "Vehicles Not Serviced": ${notServiced}.${saysNo ? ` (The question "Any types of vehicles you do not service?" was answered "${excludesAnswer.slice(0, 60)}" — the vehicles they listed are used; confirm with the client.)` : ""}` : "";
   set("vehicles", makes
-    ? F(makes, "jira", "review", "From Jira — the makes they work on (not all makes). Check the template's wording.")
-    : excludes && notServiced
-    ? F(`All Makes and Models EXCEPT ${notServiced.replace(/\s+/g, " ").trim()}`, "rule", "ok")
+    ? F(notServiced ? `${makes} — EXCEPT ${notServiced}` : makes, "jira", "review", ["From Jira — the makes they work on (not all makes). Check the template's wording.", exceptNote].filter(Boolean).join(" "))
+    : notServiced
+    ? F(`All Makes and Models EXCEPT ${notServiced}`, "jira", saysNo ? "review" : "ok", exceptNote)
     : F("All Makes and Models", "rule", "ok"));
 
   const wants = (re: RegExp) => jira.pages.some((p) => re.test(p));
@@ -414,6 +469,7 @@ export function fromJira(jira: JiraProject, f: JiraFields, opts: { minAmenities:
   applyJiraInstructions(c, { about, faq, coupons });
 
   const amenities = uniqLines(splitLines(pick(f, /^Amenities$/i, /benefit/i)).map(titleCase));
+  applyHiddenFacts(c, { amenities, about, faq, notes: [pick(f, /^Instructions$/i), pick(f, /^Other Payload Details$/i)].join("\n") });
   set("amenities", F(amenities.join("\n"), "jira", amenities.length >= c.minAmenities ? "ok" : "review",
     amenities.length < c.minAmenities ? `Template needs ${c.minAmenities}; Jira has ${amenities.length}. Research will add more from their website/socials.` : ""));
 
@@ -429,6 +485,7 @@ export function fromJira(jira: JiraProject, f: JiraFields, opts: { minAmenities:
 
   c.pages = jira.pages;
   c.payloadRead = (f["Duda Payload"] || []).length > 0;
+  c.readVersion = JIRA_READ_VERSION;
 
   // ---- MSO: one block per shop ----
   const addrs = parseAddresses(rawAddr);

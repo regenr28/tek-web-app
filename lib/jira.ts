@@ -166,14 +166,26 @@ export function applyPayload(fields: JiraFields) {
   let p: Obj;
   try { const j = JSON.parse(raw); if (!isObj(j)) return; p = j; } catch { fields["Payload Problem"] = ["The Duda Payload in Jira isn't valid JSON — only the classic Jira fields were used."]; return; }
   const set = (k: string, v: string) => { if (v && !(fields[k] || []).some((x) => x.trim())) fields[k] = [v]; };
+  /** every value in the payload ("site_structure.careers_email" → …) — whatever isn't used below is kept as a note */
+  const leaves = new Map<string, unknown>();
+  const walk = (v: unknown, path: string) => {
+    if (isObj(v)) { for (const [k, x] of Object.entries(v)) walk(x, path ? `${path}.${k}` : k); return; }
+    if (Array.isArray(v) && v.some((x) => isObj(x) || Array.isArray(x))) { leaves.set(path, v); return; } // lists of objects (services) stay whole
+    leaves.set(path, v);
+  };
+  walk(p, "");
   const used = new Set<string>();
-  const take = (path: string, v: unknown) => { used.add(path); return v; };
+  /** marks a payload path (and everything under it) as used */
+  const take = (path: string, v: unknown) => { for (const k of leaves.keys()) if (k === path || k.startsWith(path + ".")) used.add(k); return v; };
+  const leafText = (v: unknown) => (Array.isArray(v) ? v.map((x) => (isObj(x) ? str(x.name) || JSON.stringify(x) : str(x))).filter(Boolean).join("\n") : isObj(v) ? JSON.stringify(v) : str(v));
+  /** the first payload value whose key name matches, anywhere in the payload (the form's layout changes over time) */
+  const byKey = (re: RegExp) => { for (const [k, v] of leaves) { if (used.has(k)) continue; const name = k.split(".").pop() || ""; if (re.test(name) && leafText(v)) { used.add(k); return leafText(v); } } return ""; };
 
   const identity = isObj(p.identity) ? p.identity : {};
   set("Name of Shop", str(take("identity.business_name", identity.business_name)));
   const contact = isObj(p.contact) ? p.contact : {};
   const a = isObj(contact.address) ? contact.address : {};
-  used.add("contact.address");
+  take("contact.address", a);
   const cityLine = [str(a.city), [str(a.state), str(a.postal_code)].filter(Boolean).join(" ")].filter(Boolean).join(", ");
   set("Shop Address", [str(a.street), cityLine].filter(Boolean).join(", "));
   set("Shop Phone Number", str(take("contact.phone_primary", contact.phone_primary)).replace(/^\+1(?=\d{10}$)/, ""));
@@ -182,20 +194,20 @@ export function applyPayload(fields: JiraFields) {
   set("Shop Hours", weeklyToText(take("hours.weekly", hours.weekly)));
 
   const services = Array.isArray(p.services) ? p.services.map((x) => (isObj(x) ? str(x.name) : str(x))).filter(Boolean) : [];
-  used.add("services");
+  take("services", p.services);
   set("Primary Services", services.join("\n"));
   const featured = Array.isArray(p.services) ? p.services.filter((x) => isObj(x) && x.featured === true).map((x) => str((x as Obj).name)).filter(Boolean) : [];
   if (featured.length && featured.length < services.length) set("Featured Services", featured.join(", "));
 
   const veh = Array.isArray(p.vehicles_serviced) ? p.vehicles_serviced.map(str).filter(Boolean) : [];
-  used.add("vehicles_serviced");
+  take("vehicles_serviced", p.vehicles_serviced);
   set("Vehicles Serviced (Makes)", veh.join(", "));
   const vehNot = Array.isArray(p.vehicles_not_serviced) ? p.vehicles_not_serviced.map(str).filter(Boolean) : [];
-  if (vehNot.length) { used.add("vehicles_not_serviced"); set("Vehicles Not Serviced", vehNot.join(", ")); set("Are There Any Types Of Vehicles You Do Not Service?", "Yes"); }
+  if (vehNot.length) { take("vehicles_not_serviced", p.vehicles_not_serviced); set("Vehicles Not Serviced", vehNot.join(", ")); set("Are There Any Types Of Vehicles You Do Not Service?", "Yes"); }
 
   const other: string[] = [];
   const diff = isObj(p.differentiators) ? p.differentiators : {};
-  used.add("differentiators");
+  take("differentiators", diff);
   for (const [k, v] of Object.entries(diff)) {
     const text = Array.isArray(v) ? v.map(str).filter(Boolean).join("\n") : isObj(v) ? JSON.stringify(v) : str(v);
     if (!text) continue;
@@ -204,34 +216,43 @@ export function applyPayload(fields: JiraFields) {
   }
 
   const social = isObj(p.social) ? p.social : {};
-  used.add("social");
+  take("social", social);
   const gbp = str(social.google_business_profile_url) || str(social.gbp) || str(social.google);
   set("GBP Link", gbp);
   const links = Object.entries(social).filter(([k]) => !/google|gbp/i.test(k)).map(([k, v]) => (str(v) ? `${k.replace(/_/g, " ")}: ${str(v)}` : "")).filter(Boolean);
   set("Social Links", [gbp ? `Google Business Profile: ${gbp}` : "", ...links].filter(Boolean).join("\n"));
 
   const site = isObj(p.site_structure) ? p.site_structure : {};
-  used.add("site_structure");
+  take("site_structure.sections", site.sections);
   const sections = Array.isArray(site.sections) ? site.sections.map(str).filter(Boolean).map((s) => { const k = s.replace(/^other:/i, "").toLowerCase(); return SECTION_LABEL[k] || k.replace(/-/g, " ").replace(/\b\w/g, (m) => m.toUpperCase()); }) : [];
   set("Website Pages", sections.join(", "));
 
   const tpl = isObj(p.template) ? p.template : {};
-  used.add("template");
+  take("template", tpl);
   set("Design Selection", str(tpl.template_name));
   const integ = isObj(p.integrations) ? p.integrations : {};
-  used.add("integrations");
-  set("Tekmetric ID", str(integ.tekmetric_shop_id));
+  set("Tekmetric ID", str(take("integrations.tekmetric_shop_id", integ.tekmetric_shop_id)));
   const internal = isObj(p.internal) ? p.internal : {};
-  used.add("internal");
-  set("Primary Contact Email", str(internal.primary_contact_email));
-  set("Instructions", str(internal.special_instructions));
-  for (const [k, v] of Object.entries(internal)) if (!["primary_contact_email", "special_instructions"].includes(k) && str(v)) other.push(`${k.replace(/_/g, " ")}: ${str(v)}`);
+  set("Primary Contact Email", str(take("internal.primary_contact_email", internal.primary_contact_email)));
+  set("Instructions", str(take("internal.special_instructions", internal.special_instructions)));
 
-  // anything else at the top level (e.g. a website or about text added to the form later) — kept, never dropped
-  for (const [k, v] of Object.entries(p)) {
-    if (used.has(k) || ["identity", "contact", "hours"].includes(k)) continue;
-    const text = isObj(v) || Array.isArray(v) ? JSON.stringify(v).slice(0, 600) : str(v);
-    if (text) other.push(`${k.replace(/_/g, " ")}: ${text}`);
+  // Known answers wherever they sit in the payload (e.g. "site_structure.careers_email")
+  set("What email would you like to use for job applications?", byKey(/^(careers?|jobs?|hiring|employment|applications?|job_applications?)_?e?-?mail$|^(careers?|jobs?)_(contact|application)_?email$/i));
+  set("Warranty", byKey(/warrant|guarantee/i));
+  set("Please List Any Other Affiliations/Certifications:", byKey(/certif|affiliat/i));
+  set("Amenities", byKey(/amenit|benefit|perks?$/i));
+  set("Coupons", byKey(/coupon|promotion|specials?$/i));
+  set("About Us", byKey(/^about(_us)?$|about_text|story|history/i));
+  set("FAQ", byKey(/^faqs?$/i));
+  set("Financing", byKey(/financ/i));
+  set("If You Have A Domain, What Is That Domain?", byKey(/^(domain|domain_name|desired_domain)$/i));
+  set("Current Website", byKey(/^(current|existing)_?(website|site|url)$|^website(_url)?$/i));
+
+  // anything else in the payload — kept, never dropped
+  for (const [k, v] of leaves) {
+    if (used.has(k) || k === "differentiators") continue;
+    const text = leafText(v).slice(0, 600);
+    if (text) other.push(`${k.replace(/\./g, " › ").replace(/_/g, " ")}: ${text.replace(/\n/g, ", ")}`);
   }
   if (other.length) set("Other Payload Details", other.join("\n"));
 }

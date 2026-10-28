@@ -58,7 +58,13 @@ async function openPage(url: string, device: Device): Promise<{ page: Page; stat
     if (["media", "websocket", "eventsource"].includes(req.resourceType())) return req.abort().catch(() => {});
     return req.continue().catch(() => {});
   });
-  const res = await page.goto(deviceUrl(url, device), { waitUntil: "networkidle2", timeout: 30000 }).catch(() => null);
+  let navErr = "";
+  const res = await page.goto(deviceUrl(url, device), { waitUntil: "networkidle2", timeout: 30000 }).catch((e) => { navErr = (e as Error).message; return null; });
+  // the page didn't load at all (connection refused, DNS…): Chrome shows its own error page — never audit that
+  if (!res && (page.url().startsWith("chrome-error:") || /net::ERR_/.test(navErr))) {
+    await page.close().catch(() => {});
+    throw new Error(`Couldn't open the page in Chrome (${(navErr.match(/net::ERR_[A-Z_]+/) || [navErr.slice(0, 80)])[0]})`);
+  }
   // scroll through the page so lazy-loaded images, sliders and widgets render, then come back up
   await page.evaluate(async () => {
     const step = Math.max(400, Math.floor(window.innerHeight * 0.8));

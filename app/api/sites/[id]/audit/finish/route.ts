@@ -4,7 +4,7 @@ import { idOf, type Ctx } from "@/lib/http";
 import { parseBody } from "@/lib/security";
 import { finishRun } from "@/lib/audit";
 
-export const maxDuration = 60;
+export const maxDuration = 120; // site-wide checks + two AI judgements (menu, titles)
 export const POST = handle(async (req: Request, ctx: Ctx) => {
   await requireUser("member", { area: "projects" });
   const { runId } = await parseBody(req, z.object({ runId: z.number().int().positive() }));

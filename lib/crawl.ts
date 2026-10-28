@@ -7,7 +7,11 @@ export const UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36 DudaPreviewAudit/1.0";
 
 export type Block = { id: number; tag: string; text: string; selector: string; global: boolean; quote?: boolean };
-export type Img = { id: number; src: string; alt: string | null; selector: string; global: boolean; context: string; decorative: boolean };
+export type Img = { id: number; src: string; alt: string | null; selector: string; global: boolean; context: string; decorative: boolean;
+  /** inside a customer-review widget (reviewer photos, star images) — not the site builder's to fix */
+  review?: boolean };
+/** A header menu item (dropdown items too, even ones hidden until hover). */
+export type NavItem = { text: string; href: string; selector: string };
 export type Link = { href: string; abs: string; text: string; selector: string; global: boolean };
 export type BookButton = { selector: string; href: string | null; text: string; global: boolean };
 export type PageData = {
@@ -20,12 +24,29 @@ export type PageData = {
   bookButtons?: BookButton[];
   /** which device layout this was read from */
   device?: string;
+  /** the header menu (nav) items */
+  navItems?: NavItem[];
 };
 /** ShopGenie's custom "Book appointment" button — opens the booking widget, so it must not link anywhere. */
 export const BOOK_BTN = ".shopgenie-book-appt-bt";
 
 const SKIP = "script,style,noscript,template,svg,iframe,link,meta,[hidden],[aria-hidden='true'][style*='display: none'],[style*='display:none'],[style*='display: none']";
 const GLOBAL_SEL = "header,footer,#hcontainer,#fcontainer,.dmHeader,.dmFooter,.dmHeaderContainer,.dmFooterContainer,#dm-footer,.dmNavigation,nav,[role=navigation],.main-navigation,#hamburger-drawer,#hamburger-header-container,#hamburger-header";
+/** Customer-review widgets (Duda / ShopGenie / Google review sliders, testimonials) — by class / id / widget type.
+ *  ("preview" is not "review": Duda preview pages put "preview" in class names.) */
+const REVIEW_ATTR = /(^|[^p])reviews?|testimonial|ratings?[-_]?(widget|slider|carousel)|star[-_]?rating/i;
+function isReviewEl($: cheerio.CheerioAPI, el: Element) {
+  for (let x: Element | null = el; x && x.type === "tag"; x = x.parent && (x.parent as Element).type === "tag" ? (x.parent as Element) : null) {
+    if (x.name === "blockquote") return true;
+    const a = x.attribs || {};
+    if (REVIEW_ATTR.test(`${a.class || ""} ${a.id || ""} ${a["data-widget-type"] || ""} ${a["data-element-type"] || ""}`)) return true;
+  }
+  return false;
+}
+/** A section heading that introduces customer reviews ("What Our Customers Say", "Reviews", "Testimonials"…) */
+export const REVIEW_HEADING = /\b(reviews?|testimonials?|what (our|people|customers|clients|drivers|neighbors)\b.{0,25}\bsay(ing)?|customer (feedback|stories|experiences)|(happy|satisfied) (customers|clients)|hear from (our|real)|(customers|clients) love us|5[- ]star (service|reviews?))\b/i;
+/** The header menu (Duda's unified nav, plain <nav>, the mobile hamburger drawer) */
+const NAV_SEL = "nav,[role=navigation],.unifiednav,.dmNavigation,.main-navigation,#hamburger-drawer";
 const FULL_TEXT_TAGS = new Set(["p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "td", "th", "blockquote", "figcaption", "label", "button", "a", "dt", "dd", "caption", "address"]);
 
 /** Fetches a page through the SSRF-safe client; only domains allowed in Settings → Security can be reached. */
@@ -191,6 +212,35 @@ export function extract(url: string, finalUrl: string, status: number, html: str
   const title = clean($("title").first().text());
   const metaDescription = clean($('meta[name="description"]').attr("content") || "");
   const formRecipients = [...new Set($('input[name="dmformsendto"]').map((_, i) => ($(i).attr("value") || "").split(/[,;\s]+/)).get().flat().map((x) => String(x).trim().toLowerCase()).filter((x) => /@/.test(x)))];
+  // Menu items and images are read before hidden parts are removed: dropdown items and images in the mobile menu are
+  // hidden until opened, but they're still on the site.
+  const navItems: NavItem[] = [];
+  $(NAV_SEL).find("a").each((_, a) => {
+    if ($(a).parents(NAV_SEL).filter((__, n) => $(n).closest("footer,#fcontainer,.dmFooter,.dmFooterContainer").length > 0).length) return; // a footer menu isn't the header nav
+    const text = clean($(a).text()) || clean($(a).attr("aria-label") || "") || clean($(a).attr("title") || "");
+    const href = ($(a).attr("href") || "").trim();
+    if (text && !navItems.some((n) => n.text.toLowerCase() === text.toLowerCase() && n.href === href)) navItems.push({ text: text.slice(0, 80), href: href.slice(0, 300), selector: selectorFor($, a as Element) });
+  });
+  const images: Img[] = [];
+  $("img").each((_, img) => {
+    const $i = $(img);
+    if ($i.closest("noscript,template,script").length) return;
+    const src = $i.attr("data-src") || $i.attr("src") || $i.attr("data-lazy-src") || "";
+    if (!src || src.startsWith("data:")) return;
+    let abs = src;
+    try { abs = new URL(src, finalUrl).toString(); } catch { /* keep */ }
+    const w = Number($i.attr("width") || 0), h = Number($i.attr("height") || 0);
+    const container = $i.closest("figure,a,div");
+    images.push({
+      id: images.length, src: abs,
+      alt: $i.attr("alt") === undefined ? null : clean($i.attr("alt") || ""),
+      selector: selectorFor($, img), global: $i.closest(GLOBAL_SEL).length > 0,
+      context: clean(container.text()).slice(0, 200),
+      decorative: $i.attr("role") === "presentation" || $i.attr("aria-hidden") === "true" && $i.attr("alt") === "" || (w > 0 && w <= 2 && h > 0 && h <= 2) || /\/(pixel|spacer|blank)\.(gif|png)/i.test(abs),
+      review: isReviewEl($, img as Element) || undefined,
+    });
+  });
+
   $(SKIP).remove();
   // Text on separate lines / in separate blocks must not run together ("APR.</p><p>See" is "APR. See", not "APR.See")
   $("br").replaceWith(" ");
@@ -200,6 +250,11 @@ export function extract(url: string, finalUrl: string, status: number, html: str
 
   const blocks: Block[] = [];
   const seen = new Set<string>();
+  // Customer reviews under a "Reviews" / "What our customers say" heading: everything in that heading's section, up to
+  // the next heading of the same or a higher level (reviewer names are often smaller headings), is the customers' own text.
+  let reviewArea: { level: number; section: Element | null } | null = null;
+  const sectionOf = (el: Element) => ($(el).parents(".dmRespRow,section,[class*=section i]").last().get(0) as Element | undefined) || null;
+  const inside = (el: Element, box: Element) => { for (let x: Element | null = el; x; x = x.parent && (x.parent as Element).type === "tag" ? (x.parent as Element) : null) if (x === box) return true; return false; };
   const walk = (el: Element) => {
     for (const child of el.children as AnyNode[]) {
       if (child.type !== "tag") continue;
@@ -214,7 +269,15 @@ export function extract(url: string, finalUrl: string, status: number, html: str
           if (!seen.has(key)) {
             seen.add(key);
             // Customer reviews / testimonials are quoted verbatim — don't "fix" a customer's spelling.
-            const quote = /^["“].{20,}["”]$/s.test(text) || $(c).closest("[class*=review],[class*=testimonial],[id*=review],blockquote").length > 0;
+            const hm = tag.match(/^h([1-6])$/);
+            if (hm && !global) {
+              const lvl = Number(hm[1]);
+              if (REVIEW_HEADING.test(text) && text.length <= 80) reviewArea = { level: lvl, section: sectionOf(c) };
+              else if (reviewArea && lvl <= reviewArea.level) reviewArea = null;
+            }
+            if (reviewArea && reviewArea.section && !inside(c, reviewArea.section)) reviewArea = null;
+            const inReviews = !!reviewArea && !global && !(hm && REVIEW_HEADING.test(text));
+            const quote = /^["“].{20,}["”]$/s.test(text) || isReviewEl($, c) || inReviews;
             blocks.push({ id: blocks.length, tag, text, selector: selectorFor($, c), global, quote: quote || undefined });
           }
         }
@@ -229,24 +292,6 @@ export function extract(url: string, finalUrl: string, status: number, html: str
   const headings: PageData["headings"] = [];
   $("h1,h2,h3,h4,h5,h6").each((_, h) => {
     headings.push({ level: Number(h.name[1]), text: clean($(h).text()), selector: selectorFor($, h) });
-  });
-
-  const images: Img[] = [];
-  $("img").each((_, img) => {
-    const $i = $(img);
-    const src = $i.attr("data-src") || $i.attr("src") || $i.attr("data-lazy-src") || "";
-    if (!src || src.startsWith("data:")) return;
-    let abs = src;
-    try { abs = new URL(src, finalUrl).toString(); } catch { /* keep */ }
-    const w = Number($i.attr("width") || 0), h = Number($i.attr("height") || 0);
-    const container = $i.closest("figure,a,div");
-    images.push({
-      id: images.length, src: abs,
-      alt: $i.attr("alt") === undefined ? null : clean($i.attr("alt") || ""),
-      selector: selectorFor($, img), global: isGlobal(img),
-      context: clean(container.text()).slice(0, 200),
-      decorative: $i.attr("role") === "presentation" || (w > 0 && w <= 2 && h > 0 && h <= 2),
-    });
   });
 
   const bookButtons: BookButton[] = [];
@@ -265,5 +310,5 @@ export function extract(url: string, finalUrl: string, status: number, html: str
     links.push({ href, abs, text: clean($(a).text()) || clean($(a).attr("aria-label") || ""), selector: selectorFor($, a), global: isGlobal(a) });
   });
 
-  return { url, finalUrl, status, title, metaDescription, h1s: headings.filter((h) => h.level === 1).map((h) => h.text), headings, blocks, images, links, html: "", formRecipients, bookButtons };
+  return { url, finalUrl, status, title, metaDescription, h1s: headings.filter((h) => h.level === 1).map((h) => h.text), headings, blocks, images, links, html: "", formRecipients, bookButtons, navItems };
 }

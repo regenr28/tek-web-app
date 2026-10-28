@@ -9,7 +9,7 @@ import PhotoSorter from "./PhotoSorter";
 import { emptyFacts, normalizeFacts, type Facts } from "@/lib/facts";
 
 type Site = {
-  id: number; name: string; preview_url: string; live_url: string | null; jira_key: string | null; duda_site_id: string | null;
+  id: number; name: string; preview_url: string; live_url: string | null; jira_key: string | null; duda_site_id: string | null; editor_url?: string | null;
   status: string; assignee_id: number | null; notes: string | null; facts: Facts | null; facts_source: string | null; facts_raw_text: string | null; last_run_id: number | null; has_project?: boolean; template?: string | null; project_type?: string | null;
 };
 type Run = { id: number; started_at: string; finished_at: string | null; status: string; page_count: number; finding_count: number; ai_enabled: number; started_by_name: string };
@@ -89,7 +89,7 @@ export default function SiteView({ id, me }: { id: number; me: Me }) {
         {tab === "collection" && <DataCollection siteId={id} onChanged={load} />}
         {tab === "photos" && <PhotoSorter siteId={id} />}
         {tab === "prompts" && <Prompts siteId={id} canManage={me.role !== "member"} />}
-        {tab === "findings" && <FindingsTable siteId={id} findings={findings} members={members} me={me} reload={load} onError={setErr} />}
+        {tab === "findings" && <FindingsTable siteId={id} site={site} findings={findings} members={members} me={me} reload={load} onError={setErr} />}
         {tab === "facts" && <FactsTab site={site} dudaApi={data.dudaApi} ai={data.ai} onSaved={load} onError={setErr} />}
         {tab === "pages" && <PagesTab pages={data.pages} findings={findings} />}
         {tab === "details" && <DetailsTab site={site} me={me} onSave={patch} />}
@@ -233,7 +233,23 @@ function textFragmentUrl(url: string | null, found: string | null) {
   return `${url}#:~:text=${encodeURIComponent(words)}`;
 }
 
-function FindingsTable({ siteId, findings, members, me, reload, onError }: { siteId: number; findings: Finding[]; members: Member[]; me: Me; reload: () => void; onError: (s: string) => void }) {
+/**
+ * The Duda editor address for a finding's page: https://my.duda.co/home/site/<site id>/<page> (the home page is "home").
+ * The site id comes from the Editor URL in Data Collection, the Duda site ID, or the preview link (…/site/<id>/…).
+ */
+export function editorUrlFor(site: Pick<Site, "editor_url" | "duda_site_id" | "preview_url">, pageUrl: string | null, pagePath: string) {
+  const idOf = (u?: string | null) => (u || "").match(/\/site\/([a-z0-9]+)/i)?.[1] || "";
+  const sid = idOf(site.editor_url) || (site.duda_site_id || "").trim() || idOf(site.preview_url) || idOf(pageUrl);
+  if (!sid || !/^[A-Za-z0-9_-]+$/.test(sid)) return "";
+  // only Duda's own editor hosts (white-label editors on duda.co / dudaone.com too)
+  const origin = (site.editor_url || "").match(/^https:\/\/(?:[a-z0-9-]+\.)*(?:duda\.co|dudaone\.com)(?=\/)/i)?.[0] || "https://my.duda.co";
+  let page = "";
+  try { page = (new URL(pageUrl || "").pathname.match(/\/site\/[a-z0-9]+\/(.+)$/i)?.[1] || "").replace(/\/+$/, ""); } catch { /* none */ }
+  if (!page && pagePath.startsWith("/")) page = pagePath.replace(/^\/+|\/+$/g, "");
+  return `${origin}/home/site/${sid}/${page && !/[^\w\-/.%]/.test(page) ? page : "home"}`;
+}
+
+function FindingsTable({ siteId, site, findings, members, me, reload, onError }: { siteId: number; site: Site; findings: Finding[]; members: Member[]; me: Me; reload: () => void; onError: (s: string) => void }) {
   const [f, setF] = useState({ status: "open", severity: "", category: "", page: "", source: "", who: "", q: "" });
   const [sel, setSel] = useState<Set<number>>(new Set());
   const [local, setLocal] = useState<Record<number, Partial<Finding>>>({});
@@ -249,6 +265,17 @@ function FindingsTable({ siteId, findings, members, me, reload, onError }: { sit
       setShot((x) => (x && x.id === r.id ? { ...x, url, found: res.headers.get("X-Element-Found") === "1" } : x));
     } catch (e) { setShot((x) => (x && x.id === r.id ? { ...x, err: (e as Error).message } : x)); }
   }
+  /** Opens the finding's page in the Duda editor; the Tek Finder extension scrolls to it and outlines it. */
+  const openInEditor = (r: Finding) => {
+    const base = editorUrlFor(site, r.page_url, r.page_path);
+    if (!base) { onError("No Duda site ID for this project yet — add the Editor URL in Data Collection (https://my.duda.co/home/site/…)."); return; }
+    let device = "desktop";
+    try { device = new URL(r.page_url || "").searchParams.get("dm_device") || ""; } catch { /* keep */ }
+    const only = r.message.match(/\((desktop|tablet|mobile)(?: \+ (?:desktop|tablet|mobile))* only\)$/)?.[1];
+    const f = { s: r.selector || "", t: (r.found || "").split(" — alt:")[0].split(" → ")[0].slice(0, 120), p: r.page_path, d: only || (device && device !== "desktop" ? device : ""), m: r.message.slice(0, 160) };
+    navigator.clipboard.writeText("TEKFIND:" + JSON.stringify(f)).catch(() => {});
+    window.open(`${base}#tekfind=${encodeURIComponent(JSON.stringify(f))}`, "_blank", "noopener");
+  };
   const copyForEditor = (r: Finding) => {
     navigator.clipboard.writeText("TEKFIND:" + JSON.stringify({ s: r.selector || "", t: (r.found || "").split(" — alt:")[0].split(" → ")[0].slice(0, 120), p: r.page_path }));
     setEdCopied(r.id); setTimeout(() => setEdCopied(null), 1500);
@@ -364,6 +391,7 @@ function FindingsTable({ siteId, findings, members, me, reload, onError }: { sit
                       {r.page_url && (
                         <div className="row" style={{ gap: 6, marginTop: 4 }}>
                           <button className="sm" onClick={() => showShot(r)} title="See it on the page — screenshot with the spot outlined">👁 Show on page</button>
+                          <button className="sm" onClick={() => openInEditor(r)} title="Opens this page in the Duda editor — with the Tek Finder extension it scrolls to the spot and outlines it">✏️ Open in Duda editor</button>
                           <button className="sm ghost" onClick={() => copyForEditor(r)} title="Copy, then click “Tek: find it” in your bookmarks while the Duda editor or preview is open">{edCopied === r.id ? "✓ Copied — click “Tek: find it”" : "📍 Find in editor"}</button>
                         </div>
                       )}
@@ -413,8 +441,14 @@ function EditorFinder() {
   useEffect(() => { ref.current?.setAttribute("href", "javascript:" + encodeURIComponent(FINDER)); }, []);
   return (
     <details className="small">
-      <summary>📍 Jump to a finding inside the Duda editor (one-time setup)</summary>
+      <summary>✏️ Open a finding inside the Duda editor (one-time setup)</summary>
       <div className="stack" style={{ gap: 6, marginTop: 6 }}>
+        <div><b>Best: the Tek Finder extension</b> (free, Chrome) — then <b>✏️ Open in Duda editor</b> opens the editor on that page, scrolls to the spot and outlines it.</div>
+        <div>1. <a className="btn sm" href="/api/tools/tek-finder">Download Tek Finder</a> and unzip it (you get a folder &quot;tek-finder&quot;).</div>
+        <div>2. In Chrome open <code>chrome://extensions</code>, turn on <b>Developer mode</b> (top right), click <b>Load unpacked</b> and pick the &quot;tek-finder&quot; folder.</div>
+        <div>3. Click <b>✏️ Open in Duda editor</b> on any finding. Mobile/tablet-only findings say so — switch the editor to that view.</div>
+        <div className="muted">It only reads the page you open from here; it has no network access and sends nothing anywhere.</div>
+        <div style={{ marginTop: 6 }}><b>Or: the bookmark</b> (no extension)</div>
         <div>1. Drag this button to your browser&apos;s bookmarks bar: <a ref={ref} className="btn sm" onClick={(e) => e.preventDefault()} title="Drag me to the bookmarks bar">Tek: find it</a></div>
         <div>2. On a finding, click <b>📍 Find in editor</b> (it copies the spot).</div>
         <div>3. In the Duda editor (or the preview), open that page and click <b>Tek: find it</b> in your bookmarks — it scrolls to the spot and outlines it in red. The first time, Chrome may ask to allow reading the clipboard; if not allowed, just paste when it asks.</div>

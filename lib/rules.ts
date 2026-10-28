@@ -3,6 +3,7 @@ import {
   type Facts, type Day, DAYS, DAY_LABEL, PHONE_RE, EMAIL_RE, ZIP_RE, STREET_RE,
   digits, formatPhone, normStreet, parseHours, normHoursValue,
 } from "./facts";
+import { REGION_NAMES } from "./collect";
 
 export type Severity = "error" | "warning" | "info";
 export type Finding = {
@@ -74,6 +75,16 @@ export function sameSocial(a: string, b: string) {
   return handle(a) === handle(b) && !handle(a).endsWith("/");
 }
 const normName = (s: string) => s.toLowerCase().replace(/[’']/g, "'").replace(/[^a-z0-9' ]/g, " ").replace(/\s+/g, " ").trim();
+/** "The Auto Connection" = "Auto Connection", "Joe's Auto LLC" = "Joe's Auto" (a leading "The" / legal ending doesn't matter). */
+const bizKey = (s: string) => normName(s.replace(/&/g, " and ")).replace(/^the /, "").replace(/\b(l l c|llc|inc|incorporated|corp|corporation|co|ltd|pllc|lp|llp)$/g, "").replace(/'/g, "").trim();
+export const sameBusiness = (a: string, b: string) => !!bizKey(a) && bizKey(a) === bizKey(b);
+/** The text after the last "|" — "Brake Repair in Lincoln, NE | The Auto Connection" → "The Auto Connection". */
+const lastPart = (s: string) => (s.includes("|") ? s.slice(s.lastIndexOf("|") + 1).trim() : "");
+const reEsc = (x: string) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/** A page about one service area / location ("/location/auto-repair-near-waverly-ne", "/areas-we-serve/hickman"). */
+export function isLocationPage(path: string) {
+  return /(^|\/)(locations?|areas?-(we-)?serve[ds]?|service-areas?|cities|communities)(\/|$)|(^|[\/-])(near|in|serving)-[a-z]+(?:-[a-z]+)*-[a-z]{2}$/i.test(path);
+}
 
 function lev(a: string, b: string) {
   if (a === b) return 0;
@@ -231,18 +242,27 @@ export function auditPage(p: PageData, path: string, facts: Facts): Finding[] {
 
   // ---------- images ----------
   const altCount = new Map<string, number>();
+  const bizNames = [facts.businessName, ...facts.altNames].filter(Boolean);
+  const bizName = facts.businessName;
   for (const img of p.images) {
-    if (img.decorative) continue;
+    if (img.decorative || img.review) continue; // reviewer photos / stars in a reviews widget aren't the site's images
     const file = img.src.split("/").pop()?.split("?")[0] || img.src;
     if (img.alt === null) {
       add(img, { category: "Images", severity: "error", rule: "alt-missing", message: "Image has no alt attribute", found: file });
       continue;
     }
     if (img.alt === "") {
-      add(img, { category: "Images", severity: "warning", rule: "alt-empty", message: "Image alt text is empty (OK only if purely decorative)", found: file });
+      add(img, { category: "Images", severity: bizName ? "error" : "warning", rule: "alt-empty", message: bizName ? `Image alt text is empty — every alt text needs a description ending with “ | ${bizName}”` : "Image alt text is empty (OK only if purely decorative)", found: file, expected: bizName ? `(describe the image) | ${bizName}` : undefined });
       continue;
     }
     const a = img.alt;
+    // every alt text ends with " | Business Name"
+    if (bizName && !bizNames.some((n) => sameBusiness(lastPart(a), n))) {
+      const other = lastPart(a);
+      add(img, { category: "Images", severity: "error", rule: "alt-no-business-name",
+        message: other ? `Alt text ends with “| ${other}” — it must end with “ | ${bizName}”` : `Alt text must end with “ | ${bizName}”`,
+        found: `${file} — alt: ${JSON.stringify(a)}`, expected: `${(other ? a.slice(0, a.lastIndexOf("|")) : a).trim()} | ${bizName}` });
+    }
     if (/\.(jpe?g|png|webp|gif|svg|avif)$/i.test(a) || /^(img|dsc|image|photo|pic|screenshot|shutterstock|istock|adobestock)[-_ ]?\d+/i.test(a) || (/^[\w-]{10,}$/.test(a) && /\d/.test(a) && !/\s/.test(a)))
       add(img, { category: "Images", severity: "warning", rule: "alt-filename", message: "Alt text looks like a file name", found: a });
     else if (/^(image|picture|photo|graphic) of\b/i.test(a))
@@ -258,8 +278,23 @@ export function auditPage(p: PageData, path: string, facts: Facts): Finding[] {
   if (!p.title) add(pageLevel, { category: "SEO", severity: "error", rule: "title-missing", message: "Page has no <title>" });
   else {
     if (p.title.length > 65) add(pageLevel, { category: "SEO", severity: "info", rule: "title-long", message: `Title is ${p.title.length} chars (aim ≤ 60)`, found: p.title });
-    if (names.length && !names.some((n) => normName(p.title).includes(n)))
-      add(pageLevel, { category: "SEO", severity: "info", rule: "title-no-name", message: "Title doesn't include the business name", found: p.title, expected: facts.businessName });
+    // Titles end with "<location> | <Business Name>" — e.g. "Brake Repair in Lincoln, NE | The Auto Connection"
+    if (bizName && !bizNames.some((n) => sameBusiness(lastPart(p.title), n)))
+      add(pageLevel, { category: "SEO", severity: "error", rule: "title-no-business-suffix", message: `Meta title must end with “ | ${bizName}”`, found: p.title,
+        expected: `${(lastPart(p.title) ? p.title.slice(0, p.title.lastIndexOf("|")) : p.title).trim()} | ${bizName}` });
+    const L = facts.locations[0];
+    if (L?.city && !isLocationPage(path)) {
+      const before = (lastPart(p.title) ? p.title.slice(0, p.title.lastIndexOf("|")) : p.title).trim();
+      const stName = REGION_NAMES[L.state.toUpperCase()] || "";
+      const cityRe = new RegExp(`\\b${reEsc(L.city)}\\b`, "i");
+      const atEnd = new RegExp(`\\b${reEsc(L.city)}(?:,?\\s+(?:${reEsc(L.state)}${stName ? `|${reEsc(stName)}` : ""}))?\\.?\\s*$`, "i");
+      const want = `${L.city}, ${L.state.toUpperCase()} | ${bizName || "Business Name"}`;
+      // another state in the title ("…, TX |" for a Nebraska shop) is a copy-paste from another site
+      const otherState = [...before.matchAll(/,\s*([A-Z]{2})\b/g)].map((m) => m[1]).find((st) => STATE_CODES.has(st) && st !== L.state.toUpperCase());
+      if (otherState) add(pageLevel, { category: "SEO", severity: "error", rule: "title-other-location", message: `Meta title names another state (${otherState}) — the shop is in ${L.city}, ${L.state.toUpperCase()}`, found: p.title, expected: `… ${want}` });
+      else if (!cityRe.test(before)) add(pageLevel, { category: "SEO", severity: "warning", rule: "title-no-location", message: `Meta title has no location before the business name`, found: p.title, expected: `… ${want}` });
+      else if (!atEnd.test(before)) add(pageLevel, { category: "SEO", severity: "warning", rule: "title-location-position", message: `The location should come right before “ | ${bizName || "Business Name"}”`, found: p.title, expected: `… ${want}` });
+    }
     for (const re of PLACEHOLDERS) if (re.test(p.title)) add(pageLevel, { category: "SEO", severity: "error", rule: "title-placeholder", message: "Title contains placeholder text", found: p.title });
   }
   if (!p.metaDescription) add(pageLevel, { category: "SEO", severity: "warning", rule: "meta-missing", message: "Missing meta description" });
@@ -308,7 +343,7 @@ export function sitewide(pages: { path: string; url: string; data: PageData }[],
   // contact forms (hidden "dmformsendto") should send to the shop's email
   if (facts.emails.length) for (const r of recipients) if (!facts.emails.some((e) => e.toLowerCase() === r))
     out.push({ ...site, category: "Contact info", severity: "warning", rule: "form-recipient-mismatch", message: "A contact form sends to an email that isn't in Jira", found: r, expected: facts.emails.join(", ") });
-  if (facts.businessName && !allTextNorm.includes(normName(facts.businessName)))
+  if (facts.businessName && !allTextNorm.includes(normName(facts.businessName)) && !(bizKey(facts.businessName).length > 3 && allTextNorm.includes(bizKey(facts.businessName))))
     out.push({ ...site, category: "Business name", severity: "error", rule: "fact-name-absent", message: "Business name from Jira never appears on the site", expected: facts.businessName });
   const allStreetNorm = normStreet(allText);
   for (const l of facts.locations) {

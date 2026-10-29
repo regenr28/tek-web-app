@@ -228,6 +228,14 @@ export function auditPage(p: PageData, path: string, facts: Facts): Finding[] {
       if (!path && platform !== "google")
         add(l, { category: "Links", severity: "error", rule: "social-generic", message: `${cap(platform)} link points to the generic homepage, not the client's profile`, found: l.abs });
       const expected = facts.socials.filter((s) => s.platform.toLowerCase() === platform || SOCIAL_HOSTS[s.platform.toLowerCase()]?.test(host));
+      // Google: the same listing can be written many ways (maps?cid=…, a /search?q=<shop name> link, a place link) —
+      // only two links that each name a listing id and name different ones are a mismatch
+      if (platform === "google") {
+        const mine = googleIds(l.abs);
+        if (mine.size && expected.length && expected.every((s) => { const e = googleIds(s.url); return e.size > 0 && ![...e].some((x) => mine.has(x)); }))
+          add(l, { category: "Links", severity: "error", rule: "social-mismatch", message: "Google link opens a different listing than the Jira one", found: l.abs, expected: expected.map((s) => s.url).join(", ") });
+        break;
+      }
       if (expected.length && path && !expected.some((s) => sameSocial(s.url, l.abs)))
         add(l, { category: "Links", severity: "error", rule: "social-mismatch", message: `${cap(platform)} link doesn't match Jira`, found: l.abs, expected: expected.map((s) => s.url).join(", ") });
       break;
@@ -398,6 +406,16 @@ export function sitewide(pages: { path: string; url: string; data: PageData }[],
   return out;
 }
 
+/** The listing ids in a Google link: cid (decimal; also from "0x…:0x<hex>") and place ids. A search link has none. */
+export function googleIds(u: string): Set<string> {
+  const out = new Set<string>();
+  let x = u;
+  try { x = decodeURIComponent(u); } catch { /* keep */ }
+  for (const m of x.matchAll(/[?&](?:cid|ludocid)=(\d{6,})/g)) out.add("cid:" + m[1]);
+  for (const m of x.matchAll(/0x[0-9a-f]+:0x([0-9a-f]+)/gi)) { try { out.add("cid:" + BigInt("0x" + m[1]).toString()); } catch { /* skip */ } }
+  for (const m of x.matchAll(/(?:place_id|query_place_id|placeid)[=:]([A-Za-z0-9_-]{20,})/g)) out.add("pid:" + m[1]);
+  return out;
+}
 const excerpt = (t: string, i: number) => (i > 30 ? "…" : "") + t.slice(Math.max(0, i - 30), i + 60) + (t.length > i + 60 ? "…" : "");
 const cap = (s: string) => s[0].toUpperCase() + s.slice(1);
 

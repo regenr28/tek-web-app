@@ -156,7 +156,9 @@ export function auditPageQa(p: PageData, path: string, facts: Facts, ctx: QaCtx)
       const anchor = decodeURIComponent(hm[1]).toLowerCase();
       const target = ctx.pathOf(l.abs.replace(/#.*$/, ""));
       const samePage = h.startsWith("#") || target === current;
-      if (samePage && ids.size && !ids.has(anchor) && !/^(top|main|content|!)/.test(anchor))
+      // "Scroll to top" / back-to-top buttons (#dmContent, #top…) are Duda's own — never a missing section
+      const backToTop = /^(top|main|content|!|dmcontent|dmroot|dm|site_content|backtotop|scrolltotop)/.test(anchor) || /backtotop|scrolltotop|dmBackToTop/i.test(l.selector) || /\b(back|scroll)\s*to\s*top\b/i.test(name);
+      if (samePage && ids.size && !ids.has(anchor) && !backToTop)
         add(l, { category: "Links", severity: "error", rule: "anchor-missing", message: `“${name}” jumps to #${anchor}, but there's no such section on ${current === "/" ? "the homepage" : current}`, found: `${name} → ${h}` });
       const want = linkIntent(l), have = sectionKey(anchor);
       if (want && have && want !== have && !(want === "call" || want === "book") && !(want === "directions" && /contact|hours|location/.test(have)) && !(want === "contact" && /directions|hours/.test(have)))
@@ -397,6 +399,7 @@ export function sitewideQa(pages: { path: string; url: string; data: PageData }[
     if (!target || target === p.path) continue;
     const tp = byPath.get(target);
     const anchor = decodeURIComponent(m[1]).toLowerCase();
+    if (/^(top|main|content|dmcontent|dmroot|backtotop|scrolltotop)$/.test(anchor) || /backtotop|scrolltotop/i.test(l.selector)) continue;
     if (tp && (tp.data.ids || []).length && !(tp.data.ids || []).includes(anchor))
       out.push({ ...site, path: l.global ? GLOBAL_PATH : p.path, url: p.url, selector: l.selector, global: l.global, category: "Links", severity: "error", rule: "anchor-missing", message: `“${label(l)}” jumps to ${target}#${anchor}, but that page has no such section`, found: `${label(l)} → ${l.href}` });
   }

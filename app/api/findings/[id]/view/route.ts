@@ -33,7 +33,8 @@ export const GET = handle(async (req: Request, ctx: Ctx) => {
   // meta title / description findings show the page's SEO; H1 findings outline the H1s; other "head" findings
   // (Business Info in structured data, site settings, widgets) aren't one spot on the page — the viewer says so
   const target = {
-    selector: f.selector || "", text, file, message: f.message.slice(0, 220), rule: f.rule,
+    selector: f.selector || "", text: /^\(icon\)$/.test(text) ? "" : text, href: (found.match(/ → (\S+)\s*$/)?.[1] || "").slice(0, 500), file, message: f.message.slice(0, 220), rule: f.rule,
+    devices: (f.message.match(/\(((?:desktop|tablet|mobile)(?: \+ (?:desktop|tablet|mobile))*) only\)$/)?.[1] || "desktop + tablet + mobile").split(" + "),
     head: headSel && seoRule, h1: headSel && h1Rule,
     settings: f.page_path === "Site settings" || (headSel && !seoRule && !h1Rule && !file && (!text || /Business Info|Site settings|Business text|Redirects/.test(f.category))),
   };

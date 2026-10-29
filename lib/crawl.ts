@@ -272,6 +272,16 @@ export function extract(url: string, finalUrl: string, status: number, html: str
   // aren't part of the site and can't be edited in Duda, so they're never audited (only their presence is noted).
   const userwayEl = $(".uwy,#userwayAccessibilityIcon,[class*=userway i],[id*=userway i]").length > 0;
   // (never something that holds the site itself — a script may tag <body> or the wrapper with its own class)
+  // hover effects that repeat a link's text ("Oil Change Oil Change" — two copies, one slides in on hover): keep one
+  $("a, li, button, span").each((_, el) => {
+    const kids = $(el).children().toArray();
+    if (kids.length < 2) return;
+    const texts = kids.map((k) => clean($(k).text()));
+    const first = texts[0];
+    if (first.length < 2 || !texts.every((t) => t === first)) return;
+    if (clean($(el).text()) !== texts.join(" ") && clean($(el).text()) !== texts.join("")) return;
+    for (const k of kids.slice(1)) $(k).remove();
+  });
   $(THIRD_PARTY).filter((_, el) => !/^(html|body|main|header|footer)$/i.test((el as Element).tagName) && $(el).find("#dmRoot,#dm,.dmBody,.dmInner,main,header,footer,h1,nav").length === 0).remove();
   const formRecipients = [...new Set($('input[name="dmformsendto"]').map((_, i) => ($(i).attr("value") || "").split(/[,;\s]+/)).get().flat().map((x) => String(x).trim().toLowerCase()).filter((x) => /@/.test(x)))];
   // Menu items and images are read before hidden parts are removed: dropdown items and images in the mobile menu are

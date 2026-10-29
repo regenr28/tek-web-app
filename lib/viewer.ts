@@ -24,7 +24,7 @@ async function cached(url: string, device: Device): Promise<{ html: string; fina
   return { html: r.html, finalUrl: r.finalUrl };
 }
 
-export type Target = { selector: string; text: string; file: string; message: string; rule: string; head: boolean; h1: boolean; settings: boolean };
+export type Target = { selector: string; text: string; href: string; file: string; message: string; rule: string; devices: string[]; head: boolean; h1: boolean; settings: boolean };
 
 /** The page prepared for the viewer + the CSP header that goes with it. */
 export async function viewerPage(url: string, device: Device, t: Target): Promise<{ html: string; csp: string }> {
@@ -102,6 +102,12 @@ function HIGHLIGHT(t: Target, device: string) {
   if (!el && file) el = Array.from(document.images).find((i) => norm(i.currentSrc || i.src).includes(file)) || null;
   const txt = norm(t.text).slice(0, 70);
   if (el && txt && !el.querySelector("img") && el.tagName !== "IMG" && !norm(el.textContent || "").includes(txt.slice(0, 30))) el = null;
+  // an icon link (no text): find it by where it goes
+  if (!el && t.href) {
+    const links = Array.from(document.querySelectorAll("a[href]")) as HTMLAnchorElement[];
+    const same = links.filter((a) => a.getAttribute("href") === t.href || a.href === t.href || norm(a.getAttribute("href") || "").replace(/\/+$/, "") === norm(t.href).replace(/\/+$/, ""));
+    el = same.find((a) => !norm(a.textContent || "")) || same[0] || null;
+  }
   // a form field's value (e.g. the form's send-to email)
   if (!el && txt) { const inp = Array.from(document.querySelectorAll("input[value],textarea")).find((i) => norm((i as HTMLInputElement).value).includes(txt.slice(0, 40))); if (inp) el = inp.closest("form") || inp; }
   if (!el && txt) {
@@ -109,7 +115,11 @@ function HIGHLIGHT(t: Target, device: string) {
     const hits = all.filter((e) => norm(e.textContent || "").includes(txt.slice(0, 60)));
     el = hits.find((e) => !Array.from(e.children).some((k) => norm(k.textContent || "").includes(txt.slice(0, 60)))) || hits[hits.length - 1] || null;
   }
-  if (!el) { bar("Couldn't find this exact spot on the " + device + " page", "It may have been fixed already. " + t.message, "#334155"); tell(false, false); return; }
+  if (!el) {
+    const elsewhere = t.devices.indexOf(device) < 0;
+    bar(elsewhere ? "This issue is only on " + t.devices.join(" and ") : "Couldn't find this exact spot on the " + device + " page", elsewhere ? "Switch to " + t.devices[0] + " to see it. " + t.message : "It may have been fixed already — re-run the audit to check. " + t.message, "#334155");
+    tell(false, false); return;
+  }
 
   // hidden on this device / inside a closed menu or accordion → show it
   let hidden = false;

@@ -215,6 +215,23 @@ function AuditPanel({ site, lastRun, aiAvailable, onDone, onError, canManage, co
   );
 }
 const DEVICE_W = { desktop: 1366, tablet: 820, mobile: 390 } as const;
+type Dev = "desktop" | "tablet" | "mobile";
+/** Which devices a finding shows on: "(desktop only)" / "(tablet + mobile only)" at the end of the message, else all three. */
+function devicesOf(message: string): Dev[] {
+  const m = message.match(/\(((?:desktop|tablet|mobile)(?: \+ (?:desktop|tablet|mobile))*) only\)$/);
+  return m ? (m[1].split(" + ") as Dev[]) : ["desktop", "tablet", "mobile"];
+}
+function DeviceChips({ message }: { message: string }) {
+  const on = devicesOf(message);
+  return (
+    <span className="row" style={{ gap: 3, display: "inline-flex" }} title={on.length === 3 ? "On desktop, tablet and mobile" : `Only on ${on.join(" and ")}`}>
+      {(["desktop", "tablet", "mobile"] as const).map((d) => (
+        <span key={d} className="small" style={{ padding: "1px 6px", borderRadius: 10, fontSize: 11, border: "1px solid var(--border)", background: on.includes(d) ? "var(--accent, #2f5bea)" : "transparent", color: on.includes(d) ? "#fff" : "var(--muted, #94a3b8)", textDecoration: on.includes(d) ? "none" : "line-through" }}>
+          {d === "desktop" ? "Desktop" : d === "tablet" ? "Tablet" : "Mobile"}
+        </span>))}
+    </span>
+  );
+}
 /** The page inside the app: device switch, scrolled to the finding, outlined (hidden things are shown). */
 function PageViewer({ view, onDevice, onLoaded, onClose }: { view: { id: number; title: string; device: "desktop" | "tablet" | "mobile"; loading: boolean; result?: { found: boolean; hidden: boolean } }; onDevice: (d: "desktop" | "tablet" | "mobile") => void; onLoaded: () => void; onClose: () => void }) {
   const box = useRef<HTMLDivElement>(null);
@@ -227,12 +244,13 @@ function PageViewer({ view, onDevice, onLoaded, onClose }: { view: { id: number;
         <div className="row between" style={{ gap: 8 }}>
           <b style={{ flex: 1 }}>{view.title}</b>
           <div className="row" style={{ gap: 4 }}>
-            {(["desktop", "tablet", "mobile"] as const).map((d) => <button key={d} className={`sm ${view.device === d ? "primary" : ""}`} onClick={() => onDevice(d)}>{d === "desktop" ? "🖥 Desktop" : d === "tablet" ? "📱 Tablet" : "📱 Mobile"}</button>)}
+            {(["desktop", "tablet", "mobile"] as const).map((d) => { const has = devicesOf(view.title).includes(d); return <button key={d} className={`sm ${view.device === d ? "primary" : ""}`} title={has ? "The issue shows on this device" : "The issue doesn't show on this device"} style={has ? undefined : { opacity: 0.6 }} onClick={() => onDevice(d)}>{d === "desktop" ? "🖥 Desktop" : d === "tablet" ? "📱 Tablet" : "📱 Mobile"}{has ? " ●" : ""}</button>; })}
             <a className="btn sm ghost" href={`/api/findings/${view.id}/view?device=${view.device}`} target="_blank" rel="noreferrer">Open full size ↗</a>
             <button className="sm ghost" onClick={onClose}>✕</button>
           </div>
         </div>
         <div className="small" style={{ minHeight: 18 }}>
+          {!devicesOf(view.title).includes(view.device) && <div style={{ color: "var(--warning)" }}>This issue is only on {devicesOf(view.title).join(" and ")} — switch to {devicesOf(view.title)[0]} to see it.</div>}
           {view.loading ? <><span className="spinner" /> Opening the {view.device} page in Chrome and finding the spot… (first time ~10s; then it&apos;s instant for 20 minutes)</>
             : view.result ? (view.result.found ? (view.result.hidden ? <span style={{ color: "var(--warning)" }}>Found — it was hidden on {view.device}; shown and outlined so you can see it.</span> : <span style={{ color: "var(--ok, #15803d)" }}>Found and outlined in red.</span>) : <span className="muted">Couldn&apos;t find this exact spot on the {view.device} page — it may have been fixed. Try another device.</span>) : null}
         </div>
@@ -301,10 +319,7 @@ function FindingsTable({ siteId, site, findings, members, me, reload, onError }:
   const [edCopied, setEdCopied] = useState<number | null>(null);
   /** Shows the real page (desktop / tablet / mobile) inside the app, scrolled to the finding and outlined in red. */
   function showOnPage(r: Finding) {
-    const only = r.message.match(/\((desktop|tablet|mobile)(?: \+ (?:desktop|tablet|mobile))* only\)$/)?.[1] as "desktop" | "tablet" | "mobile" | undefined;
-    let dev = "";
-    try { dev = new URL(r.page_url || "").searchParams.get("dm_device") || ""; } catch { /* none */ }
-    setView({ id: r.id, title: r.message, device: only || (dev === "mobile" || dev === "tablet" ? dev : "desktop"), loading: true });
+    setView({ id: r.id, title: r.message, device: devicesOf(r.message)[0], loading: true });
   }
   /** Opens the finding's page in the Duda editor; the Tek Finder extension scrolls to it and outlines it. */
   const openInEditor = (r: Finding) => {
@@ -410,7 +425,8 @@ function FindingsTable({ siteId, site, findings, members, me, reload, onError }:
                       {link ? <a href={link} target="_blank" rel="noreferrer" title="Open page and jump to the text">{r.page_path} ↗</a> : r.page_path}
                     </td>
                     <td style={{ minWidth: 320 }}>
-                      <div><span className={`badge ${r.severity}`} title={r.severity}>{levelOf(r)}</span> {r.message}</div>
+                      <div><span className={`badge ${r.severity}`} title={r.severity}>{levelOf(r)}</span> {r.message.replace(/ \((?:desktop|tablet|mobile)(?: \+ (?:desktop|tablet|mobile))* only\)$/, "")}</div>
+                      <div style={{ margin: "3px 0" }}><DeviceChips message={r.message} /></div>
                       {(r.found || r.expected) && (
                         <div className="diff">
                           {r.found && <><span className="k">Found</span><span className="found">{r.found}</span></>}

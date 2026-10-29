@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import { api, ago, type Member } from "./api";
+import { parseLogos, logosText, logoLabel, type Logo } from "@/lib/logos";
 
 type Me = { id: number; name: string; email: string; role: string };
 type Prov = { enabled: boolean; model: string; baseUrl: string; accountId?: string; ready?: boolean; coolingUntil?: number | null; hasKey: boolean; keyHint: string; keySource: string; label: string; defaultModel: string; signup: string; note: string };
@@ -19,6 +20,8 @@ export default function Settings({ me, dudaApi }: { me: Me; dudaApi: boolean }) 
           {isSuper && <button className={tab === "ai" ? "active" : ""} onClick={() => setTab("ai")}>AI providers</button>}
           {isAdmin && <button className={tab === "research" ? "active" : ""} onClick={() => setTab("research")}>Research</button>}
           {isAdmin && <button className={tab === "homepage" ? "active" : ""} onClick={() => setTab("homepage")}>Prompts</button>}
+          <button className={tab === "logos" ? "active" : ""} onClick={() => setTab("logos")}>Logos</button>
+          {dudaApi && <button className={tab === "templates" ? "active" : ""} onClick={() => setTab("templates")}>Templates</button>}
           {isAdmin && <button className={tab === "members" ? "active" : ""} onClick={() => setTab("members")}>Members</button>}
           <button className={tab === "duda" ? "active" : ""} onClick={() => setTab("duda")}>Duda API</button>
           {isSuper && <button className={tab === "log" ? "active" : ""} onClick={() => setTab("log")}>Security log</button>}
@@ -26,6 +29,8 @@ export default function Settings({ me, dudaApi }: { me: Me; dudaApi: boolean }) 
         {tab === "ai" && isSuper && <AiSettings />}
         {tab === "research" && isAdmin && <ResearchSettings canEdit={isSuper} />}
         {tab === "homepage" && isAdmin && <PromptSettings />}
+        {tab === "logos" && <LogoSettings canEdit={isAdmin} />}
+        {tab === "templates" && dudaApi && <TemplatesInfo />}
         {tab === "members" && isAdmin && <Members me={me} />}
         {tab === "duda" && <DudaInfo enabled={dudaApi} />}
         {tab === "security" && isSuper && <SecuritySettings />}
@@ -324,6 +329,88 @@ function SecurityLog() {
 
 type SProv = { enabled: boolean; hasKey: boolean; keyHint: string; keySource: string; usedThisMonth: number; label: string; signup: string; note: string; maps: boolean; web: boolean };
 type Rules = { defaultAmenities: number; defaultServices: number; rules: { match: string; amenities: number }[] };
+
+type TplRow = { name: string; site: string; id: number; pages: number | null; editor: string; family: string };
+type TplMenu = { name: string; items: { title: string; url: string; hidden: string[]; depth: number; key: string; selectable: boolean }[]; mustBuild: { title: string; url: string }[] };
+/** Settings → Templates: every template, its menu (per device) and what's built on every site from it. */
+function TemplatesInfo() {
+  const [list, setList] = useState<TplRow[] | null>(null);
+  const [menus, setMenus] = useState<Record<string, TplMenu | string>>({});
+  const [q, setQ] = useState(""); const [err, setErr] = useState("");
+  useEffect(() => { api<{ templates: TplRow[] }>("/api/settings/templates").then((r) => setList(r.templates)).catch((e) => setErr(e.message)); }, []);
+  if (!list) return <p className="muted">{err || "Loading templates…"}</p>;
+  const open = async (t: TplRow) => {
+    if (menus[t.site]) { setMenus((m) => { const n = { ...m }; delete n[t.site]; return n; }); return; }
+    setMenus((m) => ({ ...m, [t.site]: "Loading…" }));
+    try { const r = await api<TplMenu>(`/api/settings/templates?site=${encodeURIComponent(t.site)}`); setMenus((m) => ({ ...m, [t.site]: r })); }
+    catch (e) { setMenus((m) => ({ ...m, [t.site]: (e as Error).message })); }
+  };
+  const shown = list.filter((t) => !q || t.name.toLowerCase().includes(q.toLowerCase()));
+  const fams = [...new Set(shown.map((t) => t.family))];
+  const dev = (h: string[]) => (h.length >= 3 ? "hidden" : h.length ? `hidden on ${h.map((x) => x.toLowerCase()).join(", ")}` : "desktop · tablet · mobile");
+  return (
+    <div className="stack" style={{ maxWidth: 900 }}>
+      <p className="muted small">The templates in the account ({list.length}). Open one to see its menu on each device. <b>Must build</b> = the template&apos;s own menu items that aren&apos;t a selectable page / section (Services Offered, Vehicles You Work On, Contact / Hours, Coupons / Specials, Reviews / Testimonials, Careers / Now Hiring, Financing Options, Warranty) — the QA audit expects them on every site made from that template, even when not requested.</p>
+      <input placeholder="Filter, e.g. Single Location Template 24" value={q} onChange={(e) => setQ(e.target.value)} />
+      {fams.map((f) => (
+        <details key={f} open={!/other/i.test(f)}>
+          <summary><b>{f}</b> ({shown.filter((t) => t.family === f).length})</summary>
+          {shown.filter((t) => t.family === f).map((t) => {
+            const m = menus[t.site];
+            return (
+              <div key={t.site} className="card" style={{ boxShadow: "none", padding: 8, margin: "6px 0" }}>
+                <div className="row between"><span><b>{t.name}</b> <span className="muted small">#{t.id} · {t.pages ?? "?"} pages · {t.editor}</span></span><button className="sm" onClick={() => open(t)}>{m ? "Hide menu" : "Menu"}</button></div>
+                {typeof m === "string" && <div className="small muted">{m}</div>}
+                {m && typeof m !== "string" && (
+                  <div className="small" style={{ marginTop: 6 }}>
+                    <div><b>Must build:</b> {m.mustBuild.length ? m.mustBuild.map((x) => `${x.title} (${x.url})`).join(", ") : "—"}</div>
+                    <table className="small" style={{ width: "100%", marginTop: 6 }}><tbody>
+                      {m.items.map((x, i) => (
+                        <tr key={i} style={{ opacity: x.hidden.length >= 3 ? 0.55 : 1 }}>
+                          <td style={{ paddingLeft: 8 + x.depth * 16 }}>{x.title}</td><td className="mono">{x.url}</td><td>{dev(x.hidden)}</td>
+                          <td>{x.selectable ? <span className="badge">selectable</span> : x.hidden.length >= 3 ? "" : <span className="badge accent">template</span>}</td>
+                        </tr>))}
+                    </tbody></table>
+                  </div>)}
+              </div>);
+          })}
+        </details>
+      ))}
+    </div>
+  );
+}
+
+/** Settings → Logos: the certification / affiliation logos the designers have. Anything else → ask the designer. */
+function LogoSettings({ canEdit }: { canEdit: boolean }) {
+  const [d, setD] = useState<{ logos: Logo[]; text: string; custom: boolean; designer: string } | null>(null);
+  const [text, setText] = useState("");
+  const [msg, setMsg] = useState(""); const [err, setErr] = useState("");
+  useEffect(() => { api<NonNullable<typeof d>>("/api/settings/logos").then((x) => { setD(x); setText(x.text); }).catch((e) => setErr(e.message)); }, []);
+  if (!d) return <p className="muted">{err || "Loading…"}</p>;
+  const save = async (body: Record<string, unknown>, done: string) => {
+    setErr(""); setMsg("");
+    try { const x = await api<NonNullable<typeof d>>("/api/settings/logos", { method: "PUT", body }); setD(x); setText(x.text); setMsg(done.replace("{n}", String(x.logos.length))); } catch (e) { setErr((e as Error).message); }
+  };
+  // rows copied from Figma's layer panel are turned into plain names here (the copied HTML is large)
+  const plain = (t: string) => (/role="row"|data-testid="layer-row"/.test(t) ? logosText(parseLogos(t)) : t);
+  const groups = [...new Set(d.logos.map((l) => l.group))];
+  return (
+    <div className="stack" style={{ maxWidth: 820 }}>
+      <h3 style={{ margin: 0 }}>Logo library ({d.logos.length})</h3>
+      <p className="muted small">The certification / affiliation / partner logos the designers already have. Data Collection and the QA audit flag any certification that isn&apos;t here — ask {d.designer} for that logo. One logo per line; a line ending in &quot;:&quot; starts a group. You can also paste the rows copied from Figma&apos;s layer panel (Figma only shows the rows you scrolled to — paste each part and use <b>Add to the list</b>).{!d.custom && " (Not saved yet: showing the logos from the first paste.)"}</p>
+      <textarea rows={16} className="mono" value={text} disabled={!canEdit} onChange={(e) => setText(e.target.value)} onPaste={(e) => { const t = e.clipboardData.getData("text/html") || e.clipboardData.getData("text"); if (/role="row"|data-testid="layer-row"/.test(t)) { e.preventDefault(); setText((x) => (x.trim() ? x + "\n\n" : "") + plain(t)); } }} />
+      {canEdit && <div className="row">
+        <button className="primary" onClick={() => save({ text: plain(text) }, "Saved — {n} logos.")}>Save list</button>
+        <button onClick={async () => { const t = await navigator.clipboard.readText().catch(() => ""); if (!t.trim()) { setErr("Nothing to add — copy the names (or the Figma layer rows) first."); return; } save({ text: plain(t), add: true }, "Added — {n} logos now."); }}>Add to the list (from clipboard)</button>
+        <button className="ghost" onClick={() => { if (confirm("Put the list back to the logos from the first paste?")) save({ reset: true }, "Reset — {n} logos."); }}>Reset</button>
+      </div>}
+      {msg && <div className="alert">{msg}</div>}{err && <div className="alert error">{err}</div>}
+      <details><summary className="small">Preview ({groups.length} group{groups.length === 1 ? "" : "s"})</summary>
+        {groups.map((g) => <p key={g} className="small"><b>{g || "No group"}:</b> {d.logos.filter((l) => l.group === g).map((l) => logoLabel(l.name)).join(", ")}</p>)}
+      </details>
+    </div>
+  );
+}
 
 function ResearchSettings({ canEdit }: { canEdit: boolean }) {
   const [d, setD] = useState<{ search: { order: string[]; aiFirst: boolean; providers: Record<string, SProv> }; templates: Rules } | null>(null);

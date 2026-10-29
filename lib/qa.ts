@@ -9,6 +9,7 @@ import { type Facts, PHONE_RE, digits, formatPhone, normStreet, parseHours, norm
 import { GLOBAL_PATH, sameBusiness, isLocationPage, type Finding, type Severity } from "./rules";
 import { REGION_NAMES } from "./collect";
 import type { SiteSnapshot } from "./duda";
+import { findLogo, logoLabel, DESIGNER, type Logo } from "./logos";
 
 export type QaCtx = {
   /** the link opens the site's homepage (no #section) */
@@ -26,6 +27,10 @@ export type QaCtx = {
   settings?: boolean;
   /** every page the site has (from its settings), linked or not: "/careers" */
   sitePages?: string[];
+  /** the menu is checked from the site's settings (per device) — the page-code menu checks are skipped */
+  siteNav?: boolean;
+  /** the logo library (the logos the designers have) */
+  logos?: Logo[];
 };
 
 type Add = (where: { selector: string; global: boolean }, f: Omit<Finding, "path" | "url" | "selector" | "source" | "global">) => void;
@@ -39,6 +44,7 @@ const reEsc = (x: string) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /** Section / page kinds, from link text, anchor ids, page addresses and headings. */
 export const SECTION_KEYS: [string, RegExp][] = [
+  ["areas", /\b(service areas?|nearby (service )?areas?|areas? (we )?serve[ds]?|cities (we )?serve)\b/i], // before "services"
   ["book", /\b(book|booking|appointments?|schedul\w*|reserve)\b/i],
   ["reviews", /\b(reviews?|testimonials?|what (our|people|customers|clients|drivers)\b.{0,25}\bsay(ing)?|(customers|clients) love us)\b/i],
   ["directions", /\b(directions?|get directions|map|find us|locate|navigate|pin|marker|map-marker|location-pin)\b/i],
@@ -296,6 +302,13 @@ const BRANDS: [string, RegExp][] = [
   ["RepairPal", /repairpal/i], ["TechNet", /tech-?net/i], ["AMSOIL", /amsoil/i], ["Motorcraft", /motorcraft/i], ["Mopar", /\bmopar\b/i], ["ATRA", /\batra\b/i],
 ];
 
+/**
+ * The pages / sections a client selects in the Jira form: Services Offered, Vehicles You Work On, Contact / Hours,
+ * Coupons / Specials, About Us, Reviews / Testimonials, Careers / Now Hiring, Financing Options, Warranty (+ Blog, FAQ).
+ * These are only on the site when requested; Services / Contact are often part of the template, so those are warnings.
+ */
+const OPTIONAL_SECTIONS = ["careers", "coupons", "financing", "warranty", "reviews", "blog", "vehicles", "faq"];
+
 export function sitewideQa(pages: { path: string; url: string; data: PageData }[], facts: Facts, ctx: QaCtx): Finding[] {
   const out: Finding[] = [];
   const site = { path: "Site-wide", url: "", selector: "", source: "rule" as const, global: true };
@@ -326,10 +339,12 @@ export function sitewideQa(pages: { path: string; url: string; data: PageData }[
   if (ctx.requested.length) {
     const reqKeys = new Set(ctx.requested.map((r) => sectionKey(r)).filter(Boolean));
     const nav = uniqNav(pages.flatMap((p) => p.data.navItems || []));
-    for (const n of nav) {
+    if (!ctx.siteNav) for (const n of nav) {
       const k = sectionKey(n.text);
-      if (["careers", "coupons", "financing", "warranty", "reviews", "blog", "vehicles", "faq"].includes(k) && !reqKeys.has(k))
-        out.push({ ...site, path: GLOBAL_PATH, url: home.url, selector: n.selector, category: "Navigation", severity: "error", rule: "nav-not-requested", message: `The menu has “${n.text}”, but it wasn't requested in Jira`, found: n.text, expected: `Requested: ${ctx.requested.join(", ")}` });
+      // the selectable pages / sections (Home and About are on every template's menu by default)
+      const sev = OPTIONAL_SECTIONS.includes(k) ? "error" : ["services", "contact"].includes(k) ? "warning" : "";
+      if (sev && !reqKeys.has(k))
+        out.push({ ...site, path: GLOBAL_PATH, url: home.url, selector: n.selector, category: "Navigation", severity: sev as Severity, rule: "nav-not-requested", message: `The menu has “${n.text}”, but it wasn't requested in Jira`, found: n.text, expected: `Requested: ${ctx.requested.join(", ")}` });
     }
     // every requested page / section must exist (a page, or a section heading on the page)
     const headingKeys = new Set(pages.flatMap((p) => p.data.headings.map((h) => sectionKey(h.text))).filter(Boolean));
@@ -338,7 +353,7 @@ export function sitewideQa(pages: { path: string; url: string; data: PageData }[
     // pages the site has but nobody asked for (template pages left in) — Advanced / MSO sites
     if (ctx.projectType !== "basic") for (const sp of ctx.sitePages || []) {
       const k = sectionKey(sp);
-      if (["careers", "coupons", "financing", "warranty", "reviews", "blog", "vehicles", "faq"].includes(k) && !reqKeys.has(k) && sp.split("/").filter(Boolean).length === 1)
+      if (OPTIONAL_SECTIONS.includes(k) && !reqKeys.has(k) && sp.split("/").filter(Boolean).length === 1)
         out.push({ ...site, path: sp, url: home.url, category: "Content", severity: "warning", rule: "page-not-requested", message: `The site has a “${sp.replace(/^\//, "")}” page, but it wasn't requested in Jira`, found: sp, expected: `Requested: ${ctx.requested.join(", ")}` });
     }
     for (const r of ctx.requested) {
@@ -355,10 +370,25 @@ export function sitewideQa(pages: { path: string; url: string; data: PageData }[
   for (const c of certs) {
     const brand = BRANDS.find(([, re]) => re.test(c));
     const found = brand ? brand[1].test(seeAll) : keyWords(c).length > 0 && keyWords(c).every((w) => seeAllWords.includes(` ${w} `));
-    if (!found) out.push({ ...site, url: home.url, category: "Certifications", severity: "error", rule: "cert-missing", message: `Certification from Jira isn't on the site: ${c}`, expected: c });
+    const noLogo = ctx.logos && !findLogo(c, ctx.logos);
+    if (!found) out.push({ ...site, url: home.url, category: "Certifications", severity: "error", rule: "cert-missing", message: `Certification from Jira isn't on the site: ${c}${noLogo ? ` — no logo in the library, ask ${DESIGNER}` : ""}`, expected: c });
   }
   // badges on the site that aren't in Jira ("AAA was not mentioned on the survey but was included")
   const jiraAll = `${custom("Certifications")} ${custom("Amenities")} ${custom("Warranty")} ${custom("Financing")} ${facts.notes}`;
+  // …and the library's logos, by image file name ("Route-66-logo.png") — Duda keeps the uploaded file name
+  const shown = new Set<string>();
+  for (const l of ctx.logos || []) {
+    const lab = logoLabel(l.name);
+    if (BRANDS.some(([, re]) => re.test(lab)) || findLogo(jiraAll, [l])) continue;
+    const key = lab.toLowerCase().replace(/[^a-z0-9]/g, "");
+    if (key.length < 4) continue; // ACT, APR, ETS… are too short to recognise in a file name
+    const img = pages.flatMap((p) => p.data.images.map((i) => ({ p, i }))).find(({ i }) => {
+      let file = i.src.split(/[?#]/)[0].split("/").pop() || "";
+      try { file = decodeURIComponent(file); } catch { /* keep */ }
+      return !!findLogo(file.replace(/\.[a-z0-9]+$/i, "").replace(/[-_]+/g, " "), [l]);
+    });
+    if (img && !shown.has(key)) { shown.add(key); out.push({ ...site, path: img.i.global ? GLOBAL_PATH : img.p.path, url: img.p.url, selector: img.i.selector, global: img.i.global, category: "Certifications", severity: "warning", rule: "cert-not-in-jira", message: `${lab} logo is on the site, but ${lab} isn't in the Jira`, found: img.i.src.split("/").pop() }); }
+  }
   for (const [nameB, re] of BRANDS) {
     if (re.test(jiraAll)) continue;
     const img = pages.flatMap((p) => p.data.images.map((i) => ({ p, i }))).find(({ i }) => re.test(`${i.alt || ""} ${i.src.split("/").pop()}`));

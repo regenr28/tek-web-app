@@ -150,9 +150,11 @@ const DIFF_FIELDS: [RegExp, string][] = [
   [/financ/i, "Financing"], [/warrant|guarantee/i, "Warranty"], [/amenit|benefit|perk/i, "Amenities"], [/coupon|special|promo|discount|offer/i, "Coupons"],
   [/certif|affiliat|ase\b|association/i, "List any other affiliations"], [/about|story|history/i, "About Us"], [/faq/i, "FAQ"],
 ];
+/** The selectable pages / sections, named as the team lists them. */
 const SECTION_LABEL: Record<string, string> = {
-  services: "Services Offered", vehicles: "Vehicles You Work On", financing: "Financing Options", coupons: "Coupons/Specials", specials: "Coupons/Specials",
-  warranty: "Warranty", reviews: "Reviews / Testimonials", "about-us": "About Us", about: "About Us", "contact-hours": "Contact / Hours", careers: "Careers/Job Opportunities", faq: "FAQ",
+  services: "Services Offered", vehicles: "Vehicles You Work On", financing: "Financing Options", coupons: "Coupons / Specials", specials: "Coupons / Specials",
+  warranty: "Warranty", reviews: "Reviews / Testimonials", "about-us": "About Us", about: "About Us", "contact-hours": "Contact / Hours", contact: "Contact / Hours",
+  careers: "Careers / Now Hiring", "now-hiring": "Careers / Now Hiring", faq: "FAQ",
 };
 
 /**

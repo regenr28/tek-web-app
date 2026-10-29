@@ -4,6 +4,18 @@ import { parseJiraXlsx, toProject, pick, applyPayload, applyDescription, type Ji
 import { fromJira, normalizeCollection, applyRules, fillCityState, toFacts, jiraSocialLinks, type Collection, FIELDS, JIRA_READ_VERSION } from "./collect";
 import type { Evidence } from "./research";
 import { studyJira } from "./studyjira";
+import { logoNoteFor } from "./logos";
+import { getLogos } from "./logostore";
+
+/** Certifications without a logo in the library get a note (ask the designer). */
+async function markLogos(c: Collection) {
+  const f = c.fields.certifications;
+  if (!f) return;
+  const { logos } = await getLogos();
+  const r = logoNoteFor(f.value, f.note, logos);
+  f.note = r.note;
+  if (r.missing.length && !f.manual && f.status === "ok") f.status = "review";
+}
 
 // ---------- template rules (how many amenities a template needs) ----------
 
@@ -97,6 +109,7 @@ export async function loadProject(id: number) {
         [JSON.stringify(collection), JSON.stringify({ fields, project }), project.template, id]);
     } catch { /* leave the project as it was */ }
   }
+  await markLogos(collection).catch(() => {});
   return {
     row: r, jira,
     collection,
@@ -107,6 +120,7 @@ export async function loadProject(id: number) {
 /** Saves the Data Collection and keeps the QA audit's "truth" facts in sync with it. */
 export async function saveProject(id: number, c: Collection, ev?: Evidence) {
   applyRules(c);
+  await markLogos(c).catch(() => {});
   const facts = toFacts(c);
   await run(
     `UPDATE sites SET collection_json = ?, research_json = COALESCE(?, research_json), facts_json = ?, facts_source = 'Data Collection',

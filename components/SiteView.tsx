@@ -69,7 +69,7 @@ export default function SiteView({ id, me }: { id: number; me: Me }) {
 
       {err && <div className="alert error" onClick={() => setErr("")}>{err}</div>}
 
-      {tab === "findings" && <AuditPanel site={site} lastRun={data.lastRun} aiAvailable={data.ai} onDone={load} onError={setErr} canManage={me.role !== "member"} />}
+      <AuditPanel site={site} lastRun={data.lastRun} aiAvailable={data.ai} onDone={load} onError={setErr} canManage={me.role !== "member"} compact={tab !== "findings"} />
 
       {tab === "findings" && <div className="row">
         <div className="stat"><b style={{ color: "var(--error)" }}>{open.filter((f) => levelOf(f) === "Breaking").length}</b><span>Breaking</span></div>
@@ -101,7 +101,7 @@ export default function SiteView({ id, me }: { id: number; me: Me }) {
 
 // ---------------- Audit runner ----------------
 
-function AuditPanel({ site, lastRun, aiAvailable, onDone, onError, canManage }: { site: Site; lastRun: Run | null; aiAvailable: boolean; onDone: () => void; onError: (s: string) => void; canManage: boolean }) {
+function AuditPanel({ site, lastRun, aiAvailable, onDone, onError, canManage, compact }: { site: Site; lastRun: Run | null; aiAvailable: boolean; onDone: () => void; onError: (s: string) => void; canManage: boolean; compact?: boolean }) {
   const [skip, setSkip] = useState<string[] | null>(null);
   const [editSkip, setEditSkip] = useState<string | null>(null);
   useEffect(() => { api<{ ignorePaths: string[] }>("/api/settings/audit").then((r) => setSkip(r.ignorePaths)).catch(() => setSkip([])); }, []);
@@ -110,82 +110,58 @@ function AuditPanel({ site, lastRun, aiAvailable, onDone, onError, canManage }: 
     catch (e) { onError((e as Error).message); }
   };
   const [opts, setOpts] = useState({ aiCopy: aiAvailable, aiAlt: aiAvailable, aiGlobal: true, maxPages: 60 });
-  const [running, setRunning] = useState(false);
-  const [progress, setProgress] = useState({ done: 0, total: 0, phase: "" });
-  const [log, setLog] = useState<string[]>([]);
-  const cancel = useRef(false);
-  const add = (s: string) => setLog((l) => [...l, s]);
+  const [st, setSt] = useState<AuditStatus | null>(null);
+  const [starting, setStarting] = useState(false);
+  const wasActive = useRef(false);
   useEffect(() => setOpts((o) => ({ ...o, aiCopy: aiAvailable, aiAlt: aiAvailable })), [aiAvailable]);
+  const running = !!st?.run?.active || starting;
+
+  // the audit runs on the server: this only shows its progress (it keeps going when you leave the tab or the page)
+  const poll = useCallback(async () => {
+    try {
+      const r = await api<AuditStatus>(`/api/sites/${site.id}/audit/status`);
+      setSt(r);
+      if (wasActive.current && r.run && !r.run.active) onDone();
+      wasActive.current = !!r.run?.active;
+    } catch { /* try again on the next tick */ }
+  }, [site.id, onDone]);
+  useEffect(() => {
+    poll();
+    const t = setInterval(() => { if (wasActive.current || document.visibilityState === "visible") poll(); }, 3000);
+    return () => clearInterval(t);
+  }, [poll]);
 
   async function start() {
     if (!site.facts && !confirm("No Jira facts loaded yet — the audit can't check contact info against Jira. Run anyway?")) return;
-    cancel.current = false; setRunning(true); setLog([]);
-    const ai = opts.aiCopy || opts.aiAlt;
-    try {
-      setProgress({ done: 0, total: 1, phase: "Discovering pages" });
-      add("Discovering pages from the preview link…");
-      const s = await api<{ runId: number; pages: { url: string; path: string; from?: string }[]; errors: string[]; skipped?: string[] }>(`/api/sites/${site.id}/audit/start`, { body: { ai, maxPages: opts.maxPages } });
-      s.errors.forEach((e) => add("⚠ " + e));
-      add(`Found ${s.pages.length} page(s)${s.skipped?.length ? ` · skipped ${s.skipped.join(", ")}` : ""}. Each page is opened in real Chrome on desktop, tablet and mobile.`);
-      const aiSteps = (opts.aiCopy ? 1 : 0) + (opts.aiAlt ? 1 : 0);
-      const total = s.pages.length * (1 + aiSteps) + 1;
-      let done = 0;
-      const tick = (phase: string) => setProgress({ done: ++done, total, phase });
-
-      const pageIds: { id: number; path: string }[] = [];
-      const queue = [...s.pages];
-      await Promise.all(Array.from({ length: 3 }, async () => {
-        while (queue.length && !cancel.current) {
-          const p = queue.shift()!;
-          try {
-            const r = await api<{ pageId?: number; findings: number; error?: string; note?: string }>(`/api/sites/${site.id}/audit/page`, { body: { runId: s.runId, url: p.url, from: p.from } });
-            if (r.pageId) pageIds.push({ id: r.pageId, path: p.path });
-            add(`${p.path} — ${r.error ? "✗ " + r.error : r.findings + " finding(s)"}${r.note ? ` · ⚠ ${r.note}` : ""}`);
-          } catch (e) { add(`${p.path} — ✗ ${(e as Error).message}`); }
-          tick("Checking pages");
-        }
-      }));
-
-      if (ai && !cancel.current) {
-        pageIds.sort((a, b) => a.path.length - b.path.length);
-        for (const [i, p] of pageIds.entries()) {
-          for (const kind of (["copy", "alt"] as const).filter((k) => (k === "copy" ? opts.aiCopy : opts.aiAlt))) {
-            if (cancel.current) break;
-            let attempt = 0;
-            while (true) {
-              try {
-                const r = await api<{ findings: number; models: string[] }>(`/api/sites/${site.id}/audit/ai`, { body: { runId: s.runId, pageId: p.id, kind, includeGlobal: opts.aiGlobal && i === 0 } });
-                add(`AI ${kind === "copy" ? "copy" : "alt text"} ${p.path} — ${r.findings} finding(s)${r.models.length ? ` via ${r.models.join(", ")}` : ""}`);
-                break;
-              } catch (e) {
-                const msg = (e as Error).message;
-                if (/429|rate/i.test(msg) && attempt < 2) { attempt++; add(`AI rate-limited, waiting 30s…`); await sleep(30000); continue; }
-                add(`AI ${kind} ${p.path} — ✗ ${msg.slice(0, 200)}`); break;
-              }
-            }
-            tick(`AI review (${kind === "copy" ? "body copy" : "alt text"})`);
-            await sleep(2500); // be gentle with free-tier rate limits
-          }
-        }
-      }
-      setProgress((pr) => ({ ...pr, phase: "Site-wide checks & broken links" }));
-      add("Running site-wide checks and broken-link scan…");
-      const f = await api<{ pages: number; open: number; settings?: string }>(`/api/sites/${site.id}/audit/finish`, { body: { runId: s.runId, skipped: (s as { skipped?: string[] }).skipped || [] } });
-      if (f.settings) add(f.settings);
-      setProgress({ done: total, total, phase: "Done" });
-      add(`✓ Done — ${f.pages} pages, ${f.open} open finding(s).${cancel.current ? " (cancelled early)" : ""}`);
-    } catch (e) { onError((e as Error).message); add("✗ " + (e as Error).message); }
-    setRunning(false); onDone();
+    setStarting(true);
+    try { await api(`/api/sites/${site.id}/audit/job`, { body: opts }); wasActive.current = true; await poll(); }
+    catch (e) { onError((e as Error).message); }
+    setStarting(false);
+  }
+  async function stop() {
+    if (!confirm("Stop the audit? Pages not checked yet are skipped; the site-wide checks still run on what was checked.")) return;
+    try { await api(`/api/sites/${site.id}/audit/stop`, { method: "POST", body: {} }); await poll(); } catch (e) { onError((e as Error).message); }
   }
 
-  const pct = progress.total ? Math.round((progress.done / progress.total) * 100) : 0;
+  const R = st?.run || null;
+  const P = st?.pages, A = st?.ai;
+  const aiPer = (R?.opts?.aiCopy ? 1 : 0) + (R?.opts?.aiAlt ? 1 : 0);
+  const planned = (P?.total || 0) * (1 + aiPer) + 1;
+  const finished = (P?.done || 0) + (P?.failed || 0) + (A?.done || 0) + (A?.failed || 0) + (R?.phase === "done" ? 1 : 0);
+  const pct = R ? (R.phase === "done" ? 100 : R.phase === "discovering" ? 2 : Math.min(99, Math.round((finished / Math.max(1, planned)) * 100))) : 0;
+  const phaseLabel = !R ? "" : R.phase === "discovering" ? "Finding the site's pages" : R.phase === "pages" ? ((P?.done || 0) + (P?.failed || 0) < (P?.total || 0) ? "Checking pages (desktop, tablet and mobile at once)" : "AI review") : R.phase === "finishing" ? "Site-wide checks, site settings, menus, redirects, broken links" : R.status === "failed" ? "Stopped with an error" : R.status === "stopped" ? "Stopped" : "Done";
+  if (compact) return R?.active ? (
+    <div className="card row between small" style={{ padding: "8px 12px" }}>
+      <span>⏳ <b>Audit running</b> — {phaseLabel} · {P?.done || 0}/{P?.total || "?"} pages{A?.total ? ` · AI ${A.done}/${A.total}` : ""} · {fmtDur(R.elapsedMs)}{R.etaMs ? ` · about ${fmtDur(R.etaMs)} left` : ""}</span>
+      <span className="muted">It keeps running while you work on other tabs.</span>
+    </div>) : null;
   return (
     <div className="card stack">
       <div className="row between">
         <div>
           <h2 style={{ margin: 0 }}>Audit</h2>
           <div className="muted small">
-            {lastRun ? <>Last run {ago(lastRun.started_at)} by {lastRun.started_by_name || "?"} · {lastRun.page_count} pages · {lastRun.status}</> : "Not audited yet"}
+            {lastRun ? <>Last run {ago(lastRun.started_at)} by {lastRun.started_by_name || "?"} · {lastRun.page_count} pages · {lastRun.status}{R && !R.active && R.finishedMs && R.startedMs ? <> · took {fmtDur(R.finishedMs - R.startedMs)}</> : null}</> : "Not audited yet"}
           </div>
         </div>
         <div className="row">
@@ -198,7 +174,7 @@ function AuditPanel({ site, lastRun, aiAvailable, onDone, onError, canManage }: 
           <label className="row small" style={{ gap: 4 }}>
             Max pages <input type="number" min={1} max={150} value={opts.maxPages} style={{ width: 70 }} disabled={running} onChange={(e) => setOpts({ ...opts, maxPages: Number(e.target.value) })} />
           </label>
-          {running ? <button onClick={() => { cancel.current = true; }}>Stop</button> : <button className="primary" onClick={start}>Run audit</button>}
+          {running ? <button onClick={stop} disabled={starting}>Stop</button> : <button className="primary" onClick={start}>Run audit</button>}
         </div>
       </div>
       {!aiAvailable && <div className="muted small">AI checks are off — a Super Admin can add a free Gemini / Groq / OpenRouter key in Settings.</div>}
@@ -212,17 +188,77 @@ function AuditPanel({ site, lastRun, aiAvailable, onDone, onError, canManage }: 
           <button className="sm primary" onClick={saveSkip}>Save</button><button className="sm ghost" onClick={() => setEditSkip(null)}>Cancel</button>
         </>}
       </div>
-      {(running || log.length > 0) && (
+      {starting && !R?.active && <div className="row small"><span className="spinner" /> Starting the audit…</div>}
+      {R && (R.active || Date.now() - (R.finishedMs || 0) < 30 * 60_000) && (
         <>
-          <div className="row small"><b>{progress.phase}</b><span className="muted">{pct}%</span></div>
+          <div className="row between small">
+            <span>{R.active && <span className="spinner" />} <b>{phaseLabel}</b> <span className="muted">{pct}%</span></span>
+            <span className="muted">
+              {R.active ? <>Running {fmtDur(R.elapsedMs)}{R.etaMs ? <> · about <b>{fmtDur(R.etaMs)}</b> left</> : R.phase === "discovering" ? " · finding pages (up to a minute)" : ""}</> : <>Took <b>{fmtDur(R.elapsedMs)}</b></>}
+              {st?.avgPageMs ? <> · {Math.round(st.avgPageMs / 1000)}s per page</> : null}
+            </span>
+          </div>
           <div className="progress"><div style={{ width: pct + "%" }} /></div>
-          <div className="log" ref={(el) => { if (el) el.scrollTop = el.scrollHeight; }}>{log.join("\n")}</div>
+          <div className="row small" style={{ gap: 14, flexWrap: "wrap" }}>
+            <span>Pages <b>{(P?.done || 0) + (P?.failed || 0)}</b>/{P?.total || "…"}{P?.failed ? <span className="muted"> ({P.failed} couldn&apos;t load)</span> : null}</span>
+            {aiPer > 0 && <span>AI reviews <b>{(A?.done || 0) + (A?.failed || 0)}</b>/{(P?.total || 0) * aiPer || "…"}{A?.waiting ? <span className="muted"> · {A.waiting} waiting for the free AI limit</span> : null}</span>}
+            {R.active && <span className="muted">It keeps running if you switch tabs or close this page.</span>}
+          </div>
+          {R.active && !!st?.working.length && (
+            <div className="small"><span className="muted">Now checking:</span> {st.working.slice(0, 8).map((w) => `${w.kind === "page" ? "" : w.kind === "ai-copy" ? "AI copy " : w.kind === "ai-alt" ? "AI alt " : ""}${w.path} (${Math.round(w.forMs / 1000)}s)`).join(" · ")}</div>
+          )}
+          {R.note && <div className="small muted">{R.note}</div>}
+          <div className="log">{(st?.recent || []).map((x) => `${x.kind === "page" ? "" : x.kind === "ai-copy" ? "AI copy " : x.kind === "ai-alt" ? "AI alt text " : ""}${x.path} — ${x.result}${x.ms ? ` (${Math.round(x.ms / 1000)}s)` : ""}`).join("\n")}</div>
         </>
       )}
     </div>
   );
 }
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const DEVICE_W = { desktop: 1366, tablet: 820, mobile: 390 } as const;
+/** The page inside the app: device switch, scrolled to the finding, outlined (hidden things are shown). */
+function PageViewer({ view, onDevice, onLoaded, onClose }: { view: { id: number; title: string; device: "desktop" | "tablet" | "mobile"; loading: boolean; result?: { found: boolean; hidden: boolean } }; onDevice: (d: "desktop" | "tablet" | "mobile") => void; onLoaded: () => void; onClose: () => void }) {
+  const box = useRef<HTMLDivElement>(null);
+  const [avail, setAvail] = useState(1200);
+  useEffect(() => { const f = () => setAvail(Math.max(300, (box.current?.clientWidth || 1200))); f(); window.addEventListener("resize", f); return () => window.removeEventListener("resize", f); }, []);
+  const w = DEVICE_W[view.device], scale = Math.min(1, avail / w), h = Math.round((window.innerHeight * 0.74) / scale);
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.55)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 12 }}>
+      <div className="card stack" onClick={(e) => e.stopPropagation()} style={{ width: "min(1440px, 97vw)", maxHeight: "96vh", overflow: "hidden", gap: 8 }}>
+        <div className="row between" style={{ gap: 8 }}>
+          <b style={{ flex: 1 }}>{view.title}</b>
+          <div className="row" style={{ gap: 4 }}>
+            {(["desktop", "tablet", "mobile"] as const).map((d) => <button key={d} className={`sm ${view.device === d ? "primary" : ""}`} onClick={() => onDevice(d)}>{d === "desktop" ? "🖥 Desktop" : d === "tablet" ? "📱 Tablet" : "📱 Mobile"}</button>)}
+            <a className="btn sm ghost" href={`/api/findings/${view.id}/view?device=${view.device}`} target="_blank" rel="noreferrer">Open full size ↗</a>
+            <button className="sm ghost" onClick={onClose}>✕</button>
+          </div>
+        </div>
+        <div className="small" style={{ minHeight: 18 }}>
+          {view.loading ? <><span className="spinner" /> Opening the {view.device} page in Chrome and finding the spot… (first time ~10s; then it&apos;s instant for 20 minutes)</>
+            : view.result ? (view.result.found ? (view.result.hidden ? <span style={{ color: "var(--warning)" }}>Found — it was hidden on {view.device}; shown and outlined so you can see it.</span> : <span style={{ color: "var(--ok, #15803d)" }}>Found and outlined in red.</span>) : <span className="muted">Couldn&apos;t find this exact spot on the {view.device} page — it may have been fixed. Try another device.</span>) : null}
+        </div>
+        <div ref={box} style={{ width: "100%", height: Math.round(h * scale), overflow: "hidden", border: "1px solid var(--border)", borderRadius: 8, background: "#fff", display: "flex", justifyContent: "center" }}>
+          <iframe key={`${view.id}-${view.device}`} title="Page preview" src={`/api/findings/${view.id}/view?device=${view.device}`} sandbox="allow-scripts allow-popups" onLoad={onLoaded}
+            style={{ width: w, height: h, border: 0, transform: `scale(${scale})`, transformOrigin: "top center", flex: "none" }} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+type AuditStatus = {
+  run: null | { id: number; phase: string; status: string; active: boolean; note: string; startedMs: number | null; finishedMs: number | null; elapsedMs: number; etaMs: number | null; opts: { aiCopy: boolean; aiAlt: boolean } | null };
+  pages?: { total: number; done: number; failed: number; working: number };
+  ai?: { total: number; done: number; failed: number; working: number; waiting: number };
+  avgPageMs: number; avgAiMs: number;
+  working: { kind: string; path: string; forMs: number }[];
+  recent: { kind: string; path: string; result: string; status: string; ms: number | null }[];
+};
+function fmtDur(ms: number | null | undefined) {
+  const s = Math.max(0, Math.round((ms || 0) / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60), h = Math.floor(m / 60);
+  return h ? `${h}h ${m % 60}m` : `${m}m ${String(s % 60).padStart(2, "0")}s`;
+}
 
 // ---------------- Findings ----------------
 
@@ -256,16 +292,19 @@ function FindingsTable({ siteId, site, findings, members, me, reload, onError }:
   const [sel, setSel] = useState<Set<number>>(new Set());
   const [local, setLocal] = useState<Record<number, Partial<Finding>>>({});
   const [copied, setCopied] = useState<number | null>(null);
-  const [shot, setShot] = useState<{ id: number; title: string; url?: string; found?: boolean; err?: string } | null>(null);
+  const [view, setView] = useState<{ id: number; title: string; device: "desktop" | "tablet" | "mobile"; loading: boolean; result?: { found: boolean; hidden: boolean } } | null>(null);
+  useEffect(() => {
+    const onMsg = (e: MessageEvent) => { if (e.data && e.data.tek === 1) setView((v) => (v ? { ...v, loading: false, result: { found: !!e.data.found, hidden: !!e.data.hidden } } : v)); };
+    window.addEventListener("message", onMsg);
+    return () => window.removeEventListener("message", onMsg);
+  }, []);
   const [edCopied, setEdCopied] = useState<number | null>(null);
-  async function showShot(r: Finding) {
-    setShot({ id: r.id, title: r.message });
-    try {
-      const res = await fetch(`/api/findings/${r.id}/shot`);
-      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `HTTP ${res.status}`);
-      const url = URL.createObjectURL(await res.blob());
-      setShot((x) => (x && x.id === r.id ? { ...x, url, found: res.headers.get("X-Element-Found") === "1" } : x));
-    } catch (e) { setShot((x) => (x && x.id === r.id ? { ...x, err: (e as Error).message } : x)); }
+  /** Shows the real page (desktop / tablet / mobile) inside the app, scrolled to the finding and outlined in red. */
+  function showOnPage(r: Finding) {
+    const only = r.message.match(/\((desktop|tablet|mobile)(?: \+ (?:desktop|tablet|mobile))* only\)$/)?.[1] as "desktop" | "tablet" | "mobile" | undefined;
+    let dev = "";
+    try { dev = new URL(r.page_url || "").searchParams.get("dm_device") || ""; } catch { /* none */ }
+    setView({ id: r.id, title: r.message, device: only || (dev === "mobile" || dev === "tablet" ? dev : "desktop"), loading: true });
   }
   /** Opens the finding's page in the Duda editor; the Tek Finder extension scrolls to it and outlines it. */
   const openInEditor = (r: Finding) => {
@@ -274,12 +313,12 @@ function FindingsTable({ siteId, site, findings, members, me, reload, onError }:
     let device = "desktop";
     try { device = new URL(r.page_url || "").searchParams.get("dm_device") || ""; } catch { /* keep */ }
     const only = r.message.match(/\((desktop|tablet|mobile)(?: \+ (?:desktop|tablet|mobile))* only\)$/)?.[1];
-    const f = { s: r.selector || "", t: (r.found || "").split(" — alt:")[0].split(" → ")[0].slice(0, 120), p: r.page_path, d: only || (device && device !== "desktop" ? device : ""), m: r.message.slice(0, 160) };
+    const f = { s: r.selector || "", t: (r.found || "").split(" — alt:")[0].replace(/ → (?![^“]*”).*$/, "").replace(/\s*\(in “[^”]*”?\)?\s*$/, "").split(" → ")[0].replace(/^H\d:\s*/, "").split(" · ")[0].slice(0, 120), p: r.page_path, d: only || (device && device !== "desktop" ? device : ""), m: r.message.slice(0, 160) };
     navigator.clipboard.writeText("TEKFIND:" + JSON.stringify(f)).catch(() => {});
     window.open(`${base}#tekfind=${encodeURIComponent(JSON.stringify(f))}`, "_blank", "noopener");
   };
   const copyForEditor = (r: Finding) => {
-    navigator.clipboard.writeText("TEKFIND:" + JSON.stringify({ s: r.selector || "", t: (r.found || "").split(" — alt:")[0].split(" → ")[0].slice(0, 120), p: r.page_path }));
+    navigator.clipboard.writeText("TEKFIND:" + JSON.stringify({ s: r.selector || "", t: (r.found || "").split(" — alt:")[0].replace(/ → (?![^“]*”).*$/, "").replace(/\s*\(in “[^”]*”?\)?\s*$/, "").split(" → ")[0].replace(/^H\d:\s*/, "").split(" · ")[0].slice(0, 120), p: r.page_path }));
     setEdCopied(r.id); setTimeout(() => setEdCopied(null), 1500);
   };
 
@@ -334,19 +373,7 @@ function FindingsTable({ siteId, site, findings, members, me, reload, onError }:
 
       <EditorFinder />
 
-      {shot && (
-        <div className="modal-back" onClick={() => setShot(null)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.55)", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
-          <div className="card stack" onClick={(e) => e.stopPropagation()} style={{ maxWidth: "min(1400px, 96vw)", maxHeight: "94vh", overflow: "auto" }}>
-            <div className="row between"><b>{shot.title}</b><button className="sm ghost" onClick={() => setShot(null)}>✕</button></div>
-            {shot.err ? <div className="alert error">{shot.err}</div>
-              : !shot.url ? <p className="muted">Opening the page in Chrome and finding the spot… (about 10 seconds)</p>
-              : <>
-                {!shot.found && <div className="alert warning small">Couldn&apos;t find the exact element on the page now (it may have been fixed) — showing the page.</div>}
-                <img src={shot.url} alt="Page screenshot with the finding outlined in red" style={{ maxWidth: "100%", border: "1px solid var(--border)", borderRadius: 6 }} />
-              </>}
-          </div>
-        </div>
-      )}
+      {view && <PageViewer view={view} onDevice={(d) => setView({ ...view, device: d, loading: true, result: undefined })} onLoaded={() => setView((v) => (v ? { ...v, loading: false } : v))} onClose={() => setView(null)} />}
 
       {sel.size > 0 && (
         <div className="row alert">
@@ -392,7 +419,7 @@ function FindingsTable({ siteId, site, findings, members, me, reload, onError }:
                       )}
                       {r.page_url && (
                         <div className="row" style={{ gap: 6, marginTop: 4 }}>
-                          <button className="sm" onClick={() => showShot(r)} title="See it on the page — screenshot with the spot outlined">👁 Show on page</button>
+                          <button className="sm" onClick={() => showOnPage(r)} title="Open the page here (desktop, tablet or mobile), scrolled to the spot and outlined">👁 Show on page</button>
                           <button className="sm" onClick={() => openInEditor(r)} title="Opens this page in the Duda editor — with the Tek Finder extension it scrolls to the spot and outlines it">✏️ Open in Duda editor</button>
                           <button className="sm ghost" onClick={() => copyForEditor(r)} title="Copy, then click “Tek: find it” in your bookmarks while the Duda editor or preview is open">{edCopied === r.id ? "✓ Copied — click “Tek: find it”" : "📍 Find in editor"}</button>
                         </div>

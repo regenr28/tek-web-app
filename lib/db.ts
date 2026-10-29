@@ -203,6 +203,27 @@ const SCHEMA = [
     token_hash TEXT NOT NULL,
     lease_until INTEGER NOT NULL DEFAULT 0
   )`,
+  // the QA audit as a background job: one row per page / AI review; any number of workers claim them
+  `CREATE TABLE IF NOT EXISTS audit_tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL,
+    site_id INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    url TEXT, path TEXT, from_url TEXT, page_id INTEGER,
+    status TEXT NOT NULL DEFAULT 'pending',
+    claimed_until INTEGER NOT NULL DEFAULT 0,
+    not_before INTEGER NOT NULL DEFAULT 0,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    result TEXT, started_ms INTEGER, finished_ms INTEGER
+  )`,
+  `CREATE INDEX IF NOT EXISTS audit_tasks_run ON audit_tasks(run_id, status)`,
+  // rendered pages for the in-app viewer ("Show on page"), kept for a few minutes
+  `CREATE TABLE IF NOT EXISTS view_cache (k TEXT PRIMARY KEY, html TEXT NOT NULL, final_url TEXT NOT NULL, at INTEGER NOT NULL)`,
+  // AI answers per text block / image within one run — the same text on another page reuses the answer
+  `CREATE TABLE IF NOT EXISTS audit_seen (
+    run_id INTEGER NOT NULL, h TEXT NOT NULL, issues TEXT NOT NULL,
+    PRIMARY KEY (run_id, h)
+  )`,
 ];
 
 // Columns added after the first release. Each is applied once if missing.
@@ -245,6 +266,15 @@ const COLUMNS: [table: string, column: string, ddl: string][] = [
   // site history chart: when a site that had been live stopped being published / left Duda's export (seen on import)
   ["websites", "unpublished_at", "TEXT"],
   ["websites", "removed_at", "TEXT"],
+  // the audit as a background job
+  ["runs", "token_hash", "TEXT"],
+  ["runs", "heartbeat", "INTEGER NOT NULL DEFAULT 0"],
+  ["runs", "phase", "TEXT NOT NULL DEFAULT ''"],
+  ["runs", "opts", "TEXT"],
+  ["runs", "skipped", "TEXT"],
+  ["runs", "note", "TEXT"],
+  ["runs", "started_ms", "INTEGER"],
+  ["runs", "finished_ms", "INTEGER"],
 ];
 
 async function migrate() {

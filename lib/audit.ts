@@ -1,4 +1,5 @@
 import { all, one, run, batch } from "./db";
+import { createHash } from "crypto";
 import { discover, fetchHtml, extract, scopeFor, pagePath, scoped, canonical, type PageData, type Block, type Img, type Link, type NavItem } from "./crawl";
 import { renderHtml, deviceUrl, DEVICES, type Device } from "./render";
 import { safeFetch } from "./net";
@@ -68,16 +69,25 @@ const ignored = (path: string, list: string[]) => list.some((x) => path.toLowerC
 export async function startRun(siteId: number, userId: number, ai: boolean, maxPages = 60) {
   const site = await loadSite(siteId);
   if (!site.preview_url) throw new HttpError(400, "No preview link yet — paste the Duda Editor URL in Data Collection (or the preview link under Details).");
-  const found = await discover(site.preview_url, maxPages);
+  const d = await discoverPages(site.preview_url, maxPages);
+  const { lastId: runId } = await run("INSERT INTO runs (site_id, started_by, ai_enabled) VALUES (?,?,?)", [siteId, userId, ai ? 1 : 0]);
+  await resetForRun(siteId, runId, ai);
+  return { runId, ...d };
+}
+/** Before a run: forget the previous run's pages; findings it doesn't see again get auto-resolved at the end. */
+export async function resetForRun(siteId: number, runId: number, ai: boolean) {
+  await run("DELETE FROM pages WHERE site_id = ?", [siteId]);
+  await run("UPDATE findings SET stale = 1 WHERE site_id = ? AND (source = 'rule' OR ? = 1)", [siteId, ai ? 1 : 0]);
+  await run("UPDATE sites SET last_run_id = ?, updated_at = datetime('now'), status = CASE WHEN status = 'not_started' THEN 'in_progress' ELSE status END WHERE id = ?", [runId, siteId]);
+}
+/** The pages to audit (Settings → pages every audit skips are left out). */
+export async function discoverPages(previewUrl: string, maxPages = 60) {
+  const found = await discover(previewUrl, maxPages);
   const { ignorePaths } = await getAuditSettings();
   const { errors, scope } = found;
   const pages = found.pages.filter((p) => !ignored(pagePath(p.url, scope), ignorePaths));
   const skipped = found.pages.filter((p) => ignored(pagePath(p.url, scope), ignorePaths)).map((p) => pagePath(p.url, scope));
-  const { lastId: runId } = await run("INSERT INTO runs (site_id, started_by, ai_enabled) VALUES (?,?,?)", [siteId, userId, ai ? 1 : 0]);
-  await run("DELETE FROM pages WHERE site_id = ?", [siteId]);
-  await run("UPDATE findings SET stale = 1 WHERE site_id = ? AND (source = 'rule' OR ? = 1)", [siteId, ai ? 1 : 0]);
-  await run("UPDATE sites SET last_run_id = ?, updated_at = datetime('now'), status = CASE WHEN status = 'not_started' THEN 'in_progress' ELSE status END WHERE id = ?", [runId, siteId]);
-  return { runId, pages: pages.map((p) => ({ url: p.url, path: pagePath(p.url, scope), from: p.from })), errors, skipped };
+  return { pages: pages.map((p) => ({ url: p.url, path: pagePath(p.url, scope), from: p.from })), errors, skipped };
 }
 
 export async function auditOne(siteId: number, runId: number, url: string, linkedFrom?: string) {
@@ -95,24 +105,30 @@ export async function auditOne(siteId: number, runId: number, url: string, linke
   const views: { device: Device; data: PageData }[] = [];
   let rendered = process.env.AUDIT_RENDER !== "0";
   let renderErr = "";
-  for (const device of DEVICES) {
-    try {
-      let r: { status: number; finalUrl: string; html: string };
-      if (rendered) {
-        try { r = await renderHtml(url, device); }
-        catch (e) { rendered = false; renderErr = (e as Error).message.slice(0, 200); r = await fetchHtml(deviceUrl(url, device)); }
-      } else r = await fetchHtml(deviceUrl(url, device));
-      const d = extract(url, r.finalUrl, r.status, r.html, scope);
-      d.linkedFrom = linkedFrom; d.device = device;
-      d.finalUrl = deviceUrl(r.finalUrl || url, device);
-      views.push({ device, data: d });
-    } catch (e) {
-      if (device === "desktop") {
-        await run("INSERT INTO pages (run_id, site_id, url, path, error) VALUES (?,?,?,?,?)", [runId, siteId, url, path, (e as Error).message]);
-        await upsertFindings(siteId, runId, [{ path, url, selector: "", category: "Links", severity: "error", rule: "page-fetch", message: `Couldn't load page: ${(e as Error).message}`, source: "rule", global: false }]);
-        return { path, findings: 1, error: (e as Error).message };
+  // the three devices load at the same time (each in its own Chrome tab)
+  const one_ = async (device: Device) => {
+    let r: { status: number; finalUrl: string; html: string };
+    if (rendered) {
+      try { r = await renderHtml(url, device); }
+      catch (e) {
+        const m = (e as Error).message;
+        if (/Couldn't open the page/.test(m)) throw e; // the page itself doesn't load
+        rendered = false; renderErr = m.slice(0, 200); r = await fetchHtml(deviceUrl(url, device));
       }
-    }
+    } else r = await fetchHtml(deviceUrl(url, device));
+    const d = extract(url, r.finalUrl, r.status, r.html, scope);
+    d.linkedFrom = linkedFrom; d.device = device;
+    d.finalUrl = deviceUrl(r.finalUrl || url, device);
+    return { device, data: d };
+  };
+  const results = await Promise.allSettled(DEVICES.map(one_));
+  for (const r of results) if (r.status === "fulfilled") views.push(r.value);
+  const desktopErr = results[0].status === "rejected" ? (results[0].reason as Error) : null;
+  if (desktopErr || !views.length || views[0].device !== "desktop") {
+    const msg = (desktopErr || new Error("Couldn't load the page")).message;
+    await run("INSERT INTO pages (run_id, site_id, url, path, error) VALUES (?,?,?,?,?)", [runId, siteId, url, path, msg]);
+    await upsertFindings(siteId, runId, [{ path, url, selector: "", category: "Links", severity: "error", rule: "page-fetch", message: `Couldn't load page: ${msg}`, source: "rule", global: false }]);
+    return { path, findings: 1, error: msg };
   }
   const data = views[0].data;
   // the stored page = the desktop view + links / images / form recipients that only exist on tablet or mobile
@@ -559,6 +575,26 @@ export function sameMeaning(quote: string, fix: string, blockText: string) {
 }
 
 type AiIssue = { block?: number; image?: number; quote?: string; type?: string; severity?: string; problem?: string; fix?: string; suggestedAlt?: string };
+
+/**
+ * The same text / image on another page of the same run gets the same AI answer — the answer is reused instead of
+ * asking again (vehicle and service pages share most of their sections). Findings are still added on every page.
+ */
+const seenKey = (kind: string, x: string) => kind + ":" + createHash("sha256").update(x).digest("hex").slice(0, 32);
+async function seenGet(runId: number, keys: string[]): Promise<Map<string, AiIssue[]>> {
+  const m = new Map<string, AiIssue[]>();
+  for (let i = 0; i < keys.length; i += 80) {
+    const part = keys.slice(i, i + 80);
+    if (!part.length) continue;
+    const rows = await all<{ h: string; issues: string }>(`SELECT h, issues FROM audit_seen WHERE run_id = ? AND h IN (${part.map(() => "?").join(",")})`, [runId, ...part]).catch(() => []);
+    for (const r of rows) { try { m.set(r.h, JSON.parse(r.issues)); } catch { /* skip */ } }
+  }
+  return m;
+}
+async function seenPut(runId: number, entries: [string, AiIssue[]][]) {
+  if (!entries.length) return;
+  await batch(entries.map(([h, issues]) => ({ sql: "INSERT OR IGNORE INTO audit_seen (run_id, h, issues) VALUES (?, ?, ?)", args: [runId, h, JSON.stringify(issues).slice(0, 20000)] }))).catch(() => {});
+}
 const sev = (s?: string): Severity => (s === "error" || s === "warning" || s === "info" ? s : "warning");
 
 export async function aiPage(siteId: number, runId: number, pageId: number, kind: "copy" | "alt", includeGlobal: boolean) {
@@ -572,7 +608,17 @@ export async function aiPage(siteId: number, runId: number, pageId: number, kind
   const used: string[] = [];
 
   if (kind === "copy") {
-    const blocks = data.blocks.filter((b: Block) => !b.quote && (includeGlobal || !b.global) && (b.text.length >= 15 || /^h\d$/.test(b.tag)) && !/^[\d\s().+-]+$/.test(b.text));
+    const all0 = data.blocks.filter((b: Block) => !b.quote && (includeGlobal || !b.global) && (b.text.length >= 15 || /^h\d$/.test(b.tag)) && !/^[\d\s().+-]+$/.test(b.text));
+    const keyOf = (b: Block) => seenKey("c", `${b.tag}|${b.text}`);
+    const known = await seenGet(runId, all0.map(keyOf));
+    const toFinding = (b: Block, it: AiIssue): Finding => ({
+      path: b.global ? GLOBAL_PATH : p.path, url: p.url, selector: b.selector, global: b.global, source: "ai",
+      category: "AI · Copy", severity: sev(it.severity), rule: `ai-${it.type || "copy"}`,
+      message: it.problem || "", found: it.quote || b.text.slice(0, 120), expected: it.fix,
+    });
+    for (const b of all0) for (const it of known.get(keyOf(b)) || []) if (it.problem) findings.push(toFinding(b, it));
+    const blocks = all0.filter((b) => !known.has(keyOf(b)));
+    if (all0.length > blocks.length) used.push(`${all0.length - blocks.length} block(s) already reviewed on another page`);
     // ~5,000 characters per request keeps us under free-tier token/minute caps
     const chunks: Block[][] = [];
     let cur: Block[] = [], len = 0;
@@ -587,20 +633,29 @@ export async function aiPage(siteId: number, runId: number, pageId: number, kind
       const res = await callAI({ system: COPY_SYSTEM, user });
       used.push(`${res.provider}:${res.model}`);
       const j = parseJson<{ issues?: AiIssue[] }>(res.text);
+      const per = new Map<number, AiIssue[]>(chunk.map((b) => [b.id, []]));
       for (const it of j?.issues || []) {
         const b = chunk.find((x) => x.id === Number(it.block)) || chunk.find((x) => it.quote && x.text.includes(it.quote));
         if (!b || !it.problem) continue;
         if (sameMeaning(it.quote || "", it.fix || "", b.text)) continue; // e.g. "Rd" vs "Road", or a "missing space" that's really a line break
-        findings.push({
-          path: b.global ? GLOBAL_PATH : p.path, url: p.url, selector: b.selector, global: b.global, source: "ai",
-          category: "AI · Copy", severity: sev(it.severity), rule: `ai-${it.type || "copy"}`,
-          message: it.problem, found: it.quote || b.text.slice(0, 120), expected: it.fix,
-        });
+        per.get(b.id)!.push({ quote: it.quote, type: it.type, severity: it.severity, problem: it.problem, fix: it.fix });
+        findings.push(toFinding(b, it));
       }
+      if (j) await seenPut(runId, chunk.map((b) => [keyOf(b), per.get(b.id) || []]));
     }
   } else {
     const s = await getAiSettings();
-    const imgs = data.images.filter((i: Img) => !i.decorative && (includeGlobal || !i.global));
+    const imgs0 = data.images.filter((i: Img) => !i.decorative && (includeGlobal || !i.global));
+    const keyOf = (im: Img) => seenKey("a", `${im.src.split("?")[0]}|${im.alt ?? "(none)"}`);
+    const known = await seenGet(runId, imgs0.map(keyOf));
+    const altFinding = (im: Img, it: AiIssue): Finding => ({
+      path: im.global ? GLOBAL_PATH : p.path, url: p.url, selector: im.selector, global: im.global, source: "ai",
+      category: "AI · Alt text", severity: sev(it.severity), rule: "ai-alt",
+      message: it.problem || "", found: `${im.src.split("/").pop()?.split("?")[0]} — alt: ${im.alt === null ? "(missing)" : JSON.stringify(im.alt)}`, expected: it.suggestedAlt,
+    });
+    for (const im of imgs0) for (const it of known.get(keyOf(im)) || []) if (it.problem) findings.push(altFinding(im, it));
+    const imgs = imgs0.filter((im) => !known.has(keyOf(im)));
+    if (imgs0.length > imgs.length) used.push(`${imgs0.length - imgs.length} image(s) already reviewed on another page`);
     for (let i = 0; i < imgs.length; i += 8) {
       const chunk = imgs.slice(i, i + 8);
       const prompt = (withImages: boolean, listed: { im: Img; part: unknown }[]) =>
@@ -618,15 +673,14 @@ export async function aiPage(siteId: number, runId: number, pageId: number, kind
       res ||= await callAI({ system: ALT_SYSTEM, user: prompt(false, chunk.map((im) => ({ im, part: null }))) });
       used.push(`${res.provider}:${res.model}`);
       const j = parseJson<{ issues?: AiIssue[] }>(res.text);
+      const per = new Map<number, AiIssue[]>(chunk.map((im) => [im.id, []]));
       for (const it of j?.issues || []) {
         const im = chunk.find((x) => x.id === Number(it.image));
         if (!im || !it.problem) continue;
-        findings.push({
-          path: im.global ? GLOBAL_PATH : p.path, url: p.url, selector: im.selector, global: im.global, source: "ai",
-          category: "AI · Alt text", severity: sev(it.severity), rule: "ai-alt",
-          message: it.problem, found: `${im.src.split("/").pop()?.split("?")[0]} — alt: ${im.alt === null ? "(missing)" : JSON.stringify(im.alt)}`, expected: it.suggestedAlt,
-        });
+        per.get(im.id)!.push({ severity: it.severity, problem: it.problem, suggestedAlt: it.suggestedAlt });
+        findings.push(altFinding(im, it));
       }
+      if (j) await seenPut(runId, chunk.map((im) => [keyOf(im), per.get(im.id) || []]));
     }
   }
   const n = await upsertFindings(siteId, runId, findings);

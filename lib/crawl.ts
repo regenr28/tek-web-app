@@ -69,6 +69,8 @@ export type PageData = {
 export const BOOK_BTN = ".shopgenie-book-appt-bt";
 
 const SKIP = "script,style,noscript,template,svg,iframe,link,meta,[hidden],[aria-hidden='true'][style*='display: none'],[style*='display:none'],[style*='display: none']";
+/** Widgets injected by third-party scripts (not editable in Duda). */
+export const THIRD_PARTY = ".uwy,[id*=userway i],[class*=userway i],#searchgenie,[id*=searchgenie i],[class*=searchgenie i],[id*=shopgenie i],[class*=shopgenie i],.grecaptcha-badge,#hubspot-messages-iframe-container,#CybotCookiebotDialog,#intercom-container,.intercom-lightweight-app,[id*=tawk i],#launcher,#chat-widget-container,#onetrust-consent-sdk,.goog-te-gadget";
 const GLOBAL_SEL = "header,footer,#hcontainer,#fcontainer,.dmHeader,.dmFooter,.dmHeaderContainer,.dmFooterContainer,#dm-footer,.dmNavigation,nav,[role=navigation],.main-navigation,#hamburger-drawer,#hamburger-header-container,#hamburger-header";
 /** Customer-review widgets (Duda / ShopGenie / Google review sliders, testimonials) — by class / id / widget type.
  *  ("preview" is not "review": Duda preview pages put "preview" in class names.) */
@@ -266,6 +268,11 @@ export function extract(url: string, finalUrl: string, status: number, html: str
   const $ = cheerio.load(html);
   const title = clean($("title").first().text());
   const metaDescription = clean($('meta[name="description"]').attr("content") || "");
+  // Third-party widgets (UserWay, the booking tool, chat, cookie banners, reCAPTCHA) are injected by scripts — they
+  // aren't part of the site and can't be edited in Duda, so they're never audited (only their presence is noted).
+  const userwayEl = $(".uwy,#userwayAccessibilityIcon,[class*=userway i],[id*=userway i]").length > 0;
+  // (never something that holds the site itself — a script may tag <body> or the wrapper with its own class)
+  $(THIRD_PARTY).filter((_, el) => !/^(html|body|main|header|footer)$/i.test((el as Element).tagName) && $(el).find("#dmRoot,#dm,.dmBody,.dmInner,main,header,footer,h1,nav").length === 0).remove();
   const formRecipients = [...new Set($('input[name="dmformsendto"]').map((_, i) => ($(i).attr("value") || "").split(/[,;\s]+/)).get().flat().map((x) => String(x).trim().toLowerCase()).filter((x) => /@/.test(x)))];
   // Menu items and images are read before hidden parts are removed: dropdown items and images in the mobile menu are
   // hidden until opened, but they're still on the site.
@@ -324,7 +331,7 @@ export function extract(url: string, finalUrl: string, status: number, html: str
   });
   const bizInfo = readBizInfo($);
   const widgets = {
-    userway: /userway/i.test($("script[src]").map((_, el) => $(el).attr("src")).get().join(" ") + " " + $("script:not([src])").text().slice(0, 400_000)) || $(".uwy,#userwayAccessibilityIcon,[class*=userway i]").length > 0,
+    userway: /userway/i.test($("script[src]").map((_, el) => $(el).attr("src")).get().join(" ") + " " + $("script:not([src])").text().slice(0, 400_000)) || userwayEl,
     touchIcon: $('link[rel~="apple-touch-icon"], link[rel~="apple-touch-icon-precomposed"]').length > 0,
     // the booking tool (ShopGenie): script.setAttribute("data-shop","<slug>") or <script data-shop="<slug>">
     bookingSlug: (() => {

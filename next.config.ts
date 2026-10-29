@@ -23,6 +23,10 @@ const nextConfig: NextConfig = {
     // ("[id]" would be read as a glob character class, so match the routes with wildcards)
     "/api/sites/*/audit/page": ["./node_modules/@sparticuz/chromium/bin/**"],
     "/api/findings/*/shot": ["./node_modules/@sparticuz/chromium/bin/**"],
+    "/api/findings/*/view": ["./node_modules/@sparticuz/chromium/bin/**"],
+    // the audit runs as a background job (workers render pages in Chrome)
+    "/api/sites/*/audit/job": ["./node_modules/@sparticuz/chromium/bin/**"],
+    "/api/sites/*/audit/work": ["./node_modules/@sparticuz/chromium/bin/**"],
     // research reads a website's social icons in Chrome when they're added with script
     "/api/sites/*/collection/job": ["./node_modules/@sparticuz/chromium/bin/**"],
     "/api/sites/*/collection/run": ["./node_modules/@sparticuz/chromium/bin/**"],
@@ -32,6 +36,8 @@ const nextConfig: NextConfig = {
     return [
       { source: "/:path*", headers: securityHeaders },
       { source: "/api/:path*", headers: [{ key: "Cache-Control", value: "no-store" }] },
+      // the in-app page viewer is shown in a frame of this app (it sets its own strict CSP)
+      { source: "/api/findings/:id/view", headers: [{ key: "X-Frame-Options", value: "SAMEORIGIN" }] },
     ];
   },
 };

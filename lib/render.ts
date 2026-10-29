@@ -44,7 +44,20 @@ async function browser(): Promise<Browser> {
 const PRIVATE_HOST = /^(localhost|.*\.local|.*\.internal|0\.0\.0\.0|127\.\d+\.\d+\.\d+|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|169\.254\.\d+\.\d+|\[?::1\]?|\[?f[cd][0-9a-f]{2}:.*|metadata\.google\.internal)$/i;
 const allowPrivate = () => process.env.ALLOW_PRIVATE_FETCH === "1" && !process.env.VERCEL;
 
+/** At most a few Chrome tabs at once per server instance (several audit workers can share one instance). */
+const MAX_TABS = Number(process.env.AUDIT_MAX_TABS) || 4;
+let tabs = 0;
+const waiting: (() => void)[] = [];
+async function takeTab() { if (tabs < MAX_TABS) { tabs++; return; } await new Promise<void>((r) => waiting.push(r)); tabs++; }
+function giveTab() { tabs--; const next = waiting.shift(); if (next) next(); }
+
 async function openPage(url: string, device: Device): Promise<{ page: Page; status: number; finalUrl: string }> {
+  await takeTab();
+  try { return await openPageInner(url, device); } catch (e) { giveTab(); throw e; }
+}
+async function closePage(page: Page) { await page.close().catch(() => {}); giveTab(); }
+
+async function openPageInner(url: string, device: Device): Promise<{ page: Page; status: number; finalUrl: string }> {
   const b = await browser();
   const page = await b.newPage();
   const v = VIEW[device];
@@ -151,7 +164,7 @@ export async function renderHtml(url: string, device: Device): Promise<{ status:
   try {
     await page.evaluate(MARK_LOW_CONTRAST).catch(() => {});
     return { status, finalUrl, html: await page.content() };
-  } finally { await page.close().catch(() => {}); }
+  } finally { await closePage(page); }
 }
 
 /** Screenshot of the area around one element, outlined in red. Falls back to finding the element by its text. */
@@ -178,5 +191,13 @@ export async function screenshotElement(url: string, device: Device, selector: s
     await new Promise((r) => setTimeout(r, 300));
     const png = await page.screenshot({ type: "png" });
     return { png: new Uint8Array(png), found };
-  } finally { await page.close().catch(() => {}); }
+  } finally { await closePage(page); }
+}
+
+
+/** The finished page (after scripts and lazy loading) for the in-app viewer ("Show on page"). */
+export async function snapshotHtml(url: string, device: Device): Promise<{ html: string; finalUrl: string; status: number }> {
+  const { page, status, finalUrl } = await openPage(url, device);
+  try { return { html: await page.content(), finalUrl, status }; }
+  finally { await closePage(page); }
 }

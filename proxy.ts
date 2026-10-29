@@ -18,7 +18,7 @@ export function proxy(req: NextRequest) {
     "base-uri 'none'",
     "form-action 'self'",
     "frame-ancestors 'none'",
-    "frame-src 'none'",
+    "frame-src 'self'", // the in-app page viewer ("Show on page") — our own sandboxed route only
     "worker-src 'self' blob:",
     "manifest-src 'self'",
     ...(dev ? [] : ["upgrade-insecure-requests"]),
@@ -33,5 +33,5 @@ export function proxy(req: NextRequest) {
 }
 
 export const config = {
-  matcher: [{ source: "/((?!_next/static|_next/image|icon.svg|robots.txt).*)", missing: [{ type: "header", key: "next-router-prefetch" }] }],
+  matcher: [{ source: "/((?!_next/static|_next/image|icon.svg|robots.txt|api/findings/[^/]+/view).*)", missing: [{ type: "header", key: "next-router-prefetch" }] }],
 };

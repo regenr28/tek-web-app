@@ -158,3 +158,6 @@ table.sheet td.rownum::before { content: counter(sheetrow); }
 
 /* creator credit (footer + sign-in page) */
 footer.app-credit { text-align: center; padding-top: 4px; padding-bottom: 24px; }
+
+.spinner { display: inline-block; width: 11px; height: 11px; border: 2px solid var(--border, #d0d5dd); border-top-color: var(--accent, #2f5bea); border-radius: 50%; animation: tekspin .8s linear infinite; vertical-align: -1px; margin-right: 4px; }
+@keyframes tekspin { to { transform: rotate(360deg); } }

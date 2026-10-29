@@ -93,6 +93,7 @@ const MARK_LOW_CONTRAST = `(() => {
     if (cs.backgroundImage && cs.backgroundImage !== "none") { const r = el.getBoundingClientRect(); if (r.width > 20 && r.height > 20) visuals.push(r); }
   }
   const out = [];
+  let wc = 0;
   n = 0;
   for (const el of document.querySelectorAll("p,span,a,li,h1,h2,h3,h4,h5,h6,td,div,strong,b,em,label,button")) {
     if (++n > 5000) break;
@@ -116,11 +117,31 @@ const MARK_LOW_CONTRAST = `(() => {
     const text = over(fg, bg);
     const L1 = lum(text), L2 = lum(bg);
     const ratio = (Math.max(L1, L2) + 0.05) / (Math.min(L1, L2) + 0.05);
-    if (ratio >= 1.35) continue;
+    // WCAG AA: 4.5:1 for normal text, 3:1 for large text (24px, or 18.66px bold)
+    const fs = parseFloat(cs.fontSize), large = fs >= 24 || (fs >= 18.66 && Number(cs.fontWeight) >= 700);
+    if (ratio >= (large ? 3 : 4.5)) continue;
     if (visuals.some((v) => !(v.right < r.left || v.left > r.right || v.bottom < r.top || v.top > r.bottom))) continue; // text over a picture
-    out.push(el);
-    el.setAttribute("data-tek-lc", "rgb(" + [text.r, text.g, text.b].map(Math.round).join(",") + ") on rgb(" + [bg.r, bg.g, bg.b].map(Math.round).join(",") + ")");
-    if (out.length > 40) break;
+    const colors = "rgb(" + [text.r, text.g, text.b].map(Math.round).join(",") + ") on rgb(" + [bg.r, bg.g, bg.b].map(Math.round).join(",") + ")";
+    if (ratio < 1.35) { if (out.length <= 40) { out.push(el); el.setAttribute("data-tek-lc", colors); } }
+    else if (++wc <= 60) el.setAttribute("data-tek-wc", ratio.toFixed(2) + "|" + colors + "|" + Math.round(fs) + "px");
+  }
+  // links inside FAQs / accordions must be underlined
+  let nu = 0;
+  for (const a of document.querySelectorAll("a[href]")) {
+    if (!a.closest('[class*="faq" i],[id*="faq" i],[class*="accordion" i],[data-element-type*="accordion" i],[class*="dmAccordion" i]')) continue;
+    if (!(a.textContent || "").trim() || a.querySelector("img,svg")) continue;
+    const cs = getComputedStyle(a);
+    const under = /underline/.test(cs.textDecorationLine || cs.textDecoration || "") || (parseFloat(cs.borderBottomWidth) > 0 && cs.borderBottomStyle !== "none");
+    if (!under) { a.setAttribute("data-tek-nu", "1"); if (++nu > 20) break; }
+  }
+  // footer text must be 15px or larger
+  let fsN = 0;
+  for (const el of document.querySelectorAll("footer *, #fcontainer *, .dmFooter *, .dmFooterContainer *, #dm-footer *")) {
+    if (![...el.childNodes].some((x) => x.nodeType === 3 && x.textContent.trim().length > 1)) continue;
+    const r = el.getBoundingClientRect(); if (r.width < 2 || r.height < 2) continue;
+    const cs = getComputedStyle(el); if (cs.visibility === "hidden" || cs.display === "none") continue;
+    const f = parseFloat(cs.fontSize);
+    if (f > 0 && f < 15) { el.setAttribute("data-tek-fs", String(Math.round(f * 10) / 10)); if (++fsN > 30) break; }
   }
 })()`;
 

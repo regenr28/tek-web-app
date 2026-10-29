@@ -10,6 +10,7 @@ import { HttpError } from "./auth";
 import { auditPageQa, sitewideQa, unmatchedItems, siteSettingsQa, type QaCtx } from "./qa";
 import { dudaEnabled, siteIdFrom, siteSnapshot, templateNav, type SiteSnapshot } from "./duda";
 import { navQa, navMissing, navAiPrompt, type MenuItem } from "./navqa";
+import { oldSitePaths, redirectFindings } from "./redirects";
 import { getLogos } from "./logostore";
 
 type SiteRow = { id: number; name: string; preview_url: string; facts_json: string | null };
@@ -124,7 +125,7 @@ export async function auditOne(siteId: number, runId: number, url: string, linke
     navItems: uniqBy(views.flatMap((v) => v.data.navItems || []), (n) => `${n.text.toLowerCase()}|${n.href}`),
     navDupes: [...new Set(views.flatMap((v) => v.data.navDupes || []))],
     ids: [...new Set(views.flatMap((v) => v.data.ids || []))].slice(0, 3000),
-    widgets: views.some((v) => v.data.widgets) ? { userway: views.some((v) => v.data.widgets?.userway), touchIcon: views.some((v) => v.data.widgets?.touchIcon) } : undefined,
+    widgets: views.some((v) => v.data.widgets) ? { userway: views.some((v) => v.data.widgets?.userway), touchIcon: views.some((v) => v.data.widgets?.touchIcon), bookingSlug: views.map((v) => v.data.widgets?.bookingSlug).find((x) => x !== undefined) } : undefined,
   };
   const { lastId: pageId } = await run(
     "INSERT INTO pages (run_id, site_id, url, path, title, meta_description, status_code, blocks_json, images_json, links_json) VALUES (?,?,?,?,?,?,?,?,?,?)",
@@ -148,7 +149,7 @@ function uniqBy<T>(xs: T[], key: (x: T) => string) { const seen = new Set<string
 export async function qaContext(siteId: number, previewUrl: string): Promise<QaCtx> {
   const scope = scopeFor(previewUrl);
   const r = await one<{ collection_json: string | null; research_json: string | null; project_type: string | null; editor_url: string | null; duda_site_id: string | null; preview_url: string | null }>("SELECT collection_json, research_json, project_type, editor_url, duda_site_id, preview_url FROM sites WHERE id = ?", [siteId]).catch(() => null);
-  let c: { fields?: Record<string, { value?: string }>; pages?: string[] } = {}, ev: { gbp?: { place?: { placeId?: string; cid?: string; title?: string; reviews?: number | null; rating?: number | null } | null } } = {};
+  let c: { fields?: Record<string, { value?: string }>; pages?: string[] } = {}, ev: { gbp?: { place?: { placeId?: string; cid?: string; title?: string; reviews?: number | null; rating?: number | null; type?: string } | null } } = {};
   try { c = r?.collection_json ? JSON.parse(r.collection_json) : {}; } catch { /* none */ }
   try { ev = r?.research_json ? JSON.parse(r.research_json) : {}; } catch { /* none */ }
   const f = (k: string) => String(c.fields?.[k]?.value || "");
@@ -159,7 +160,7 @@ export async function qaContext(siteId: number, previewUrl: string): Promise<QaC
   return {
     isHome: (abs) => { try { if (new URL(abs).hash.length > 1) return false; } catch { return false; } const p = pathOf(abs); return p === "/" || p === "/home"; },
     pathOf,
-    gbp: { placeId: f("placeId") || place?.placeId || "", cid: f("gbpLink").match(/cid=(\d+)/)?.[1] || place?.cid || "", name: place?.title || "", reviews: place?.reviews ?? null, rating: place?.rating ?? null },
+    gbp: { placeId: f("placeId") || place?.placeId || "", cid: f("gbpLink").match(/cid=(\d+)/)?.[1] || place?.cid || "", name: place?.title || "", reviews: place?.reviews ?? null, rating: place?.rating ?? null, category: place?.type || "" },
     except, jobEmail: f("email").toLowerCase(), requested: c.pages || [], projectType: r?.project_type || null,
     settings: dudaEnabled() && !!siteIdFrom({ editor_url: r?.editor_url || f("editorUrl"), duda_site_id: r?.duda_site_id, preview_url: r?.preview_url || previewUrl }),
     logos: (await getLogos().catch(() => null))?.logos,
@@ -235,8 +236,12 @@ export async function finishRun(siteId: number, runId: number, skippedPaths: str
   findings.push(...sitewideQa(pages, site.facts, ctx));
   // the site settings say the same as the page code's Business Info, more exactly — keep one set of findings
   if (settings.snap) await run("DELETE FROM findings WHERE site_id = ? AND run_id = ? AND rule LIKE 'bizinfo-%' AND status = 'open'", [siteId, runId]);
+  // the settings see every page (unlinked pages and service / vehicle items too) — keep their duplicate check only
+  if (settings.snap) for (let i = findings.length - 1; i >= 0; i--) if (/^duplicate-(title|metaDescription)$/.test(findings[i].rule)) findings.splice(i, 1);
   if (settings.snap) findings.push(...siteSettingsQa(settings.snap, site.facts, ctx, { templateNumber: settings.templateNumber, crawled: new Set(pages.map((p) => p.path)), homeUrl: (pages.find((p) => p.path === "/") || pages[0])?.url || site.preview_url }));
   else findings.push(...(await skippedPagesMeta(site, scope, skippedPaths).catch(() => []))); // (with the settings, every page's meta is already checked)
+  // 301 redirects: every page of the old website has one (or exists at the same address), every redirect goes somewhere real
+  if (settings.snap?.urlRules) findings.push(...(await checkRedirects(siteId, settings.snap, (pages.find((p) => p.path === "/") || pages[0])?.url || site.preview_url).catch(() => [])));
   if (r?.ai_enabled) {
     findings.push(...(await aiTitleLocations(site.facts, pages).catch(() => [])));
     findings.push(...(await aiPageSeo(site.facts, pages).catch(() => [])));
@@ -432,6 +437,18 @@ Return ONLY JSON: {"matches":[{"request":"","menuItem":""}]}` });
     message: `Requested ${what} “${m}” isn't in the header menu`, found: `Not in the menu: “${m}” — the menu has: ${nav.map((n) => n.text).slice(0, 20).join(" · ")}`, expected: m, source: "rule" as const, global: true,
   }));
 }
+async function checkRedirects(siteId: number, snap: SiteSnapshot, homeUrl: string): Promise<Finding[]> {
+  const r = await one<{ collection_json: string | null }>("SELECT collection_json FROM sites WHERE id = ?", [siteId]).catch(() => null);
+  let old = "";
+  try { old = String(JSON.parse(r?.collection_json || "{}")?.fields?.existingWebsite?.value || "").split(/\s+/)[0]; } catch { /* none */ }
+  const sitePaths = [
+    ...snap.pages.filter((p) => p.type !== "DYNAMIC").map((p) => (p.path === "home" || !p.path ? "/" : "/" + p.path.replace(/^\/+/, ""))),
+    ...snap.collections.flatMap((c) => { const pg = snap.pages.find((p) => p.type === "DYNAMIC" && p.collection_name === c.name); return pg ? (c.values || []).filter((v) => v.page_item_url).map((v) => "/" + pg.path.replace("~page-item~", String(v.page_item_url)).replace(/^\/+/, "")) : []; }),
+  ];
+  const { paths, from } = /\.[a-z]{2,}/i.test(old) ? await oldSitePaths(old) : { paths: [], from: "" };
+  return redirectFindings({ rules: snap.urlRules || [], oldPaths: paths, from, oldSite: old, sitePaths, homeUrl });
+}
+
 /** The menu from the site's settings vs the template's menu and the requests; the AI matches what the code can't. */
 async function settingsNav(snap: SiteSnapshot, ctx: QaCtx, pages: { path: string; url: string; data: PageData }[]): Promise<Finding[]> {
   const home = pages.find((p) => p.path === "/") || pages[0];

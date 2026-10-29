@@ -4,6 +4,7 @@ import {
   digits, formatPhone, normStreet, parseHours, normHoursValue,
 } from "./facts";
 import { REGION_NAMES } from "./collect";
+import { titleIssues, descIssues } from "./seoguide";
 
 export type Severity = "error" | "warning" | "info";
 export type Finding = {
@@ -277,7 +278,8 @@ export function auditPage(p: PageData, path: string, facts: Facts): Finding[] {
   // ---------- SEO ----------
   if (!p.title) add(pageLevel, { category: "SEO", severity: "error", rule: "title-missing", message: "Page has no <title>" });
   else {
-    if (p.title.length > 65) add(pageLevel, { category: "SEO", severity: "info", rule: "title-long", message: `Title is ${p.title.length} chars (aim ≤ 60)`, found: p.title });
+    // QA guidelines: under 60 characters, not the same as the H1
+    for (const i of titleIssues(p.title, { h1: p.h1s[0] })) add(pageLevel, { category: "SEO", severity: i.severity, rule: i.rule, message: i.message, found: p.title, expected: i.expected });
     // Titles end with "<location> | <Business Name>" — e.g. "Brake Repair in Lincoln, NE | The Auto Connection"
     if (bizName && !bizNames.some((n) => sameBusiness(lastPart(p.title), n)))
       add(pageLevel, { category: "SEO", severity: "error", rule: "title-no-business-suffix", message: `Meta title must end with “ | ${bizName}”`, found: p.title,
@@ -292,15 +294,24 @@ export function auditPage(p: PageData, path: string, facts: Facts): Finding[] {
       // another state in the title ("…, TX |" for a Nebraska shop) is a copy-paste from another site
       const otherState = [...before.matchAll(/,\s*([A-Z]{2})\b/g)].map((m) => m[1]).find((st) => STATE_CODES.has(st) && st !== L.state.toUpperCase());
       if (otherState) add(pageLevel, { category: "SEO", severity: "error", rule: "title-other-location", message: `Meta title names another state (${otherState}) — the shop is in ${L.city}, ${L.state.toUpperCase()}`, found: p.title, expected: `… ${want}` });
-      else if (!cityRe.test(before)) add(pageLevel, { category: "SEO", severity: "warning", rule: "title-no-location", message: `Meta title has no location before the business name`, found: p.title, expected: `… ${want}` });
+      else if (!cityRe.test(before)) add(pageLevel, { category: "SEO", severity: "error", rule: "title-no-location", message: `Meta title has no location before the business name`, found: p.title, expected: `… ${want}` });
       else if (!atEnd.test(before)) add(pageLevel, { category: "SEO", severity: "warning", rule: "title-location-position", message: `The location should come right before “ | ${bizName || "Business Name"}”`, found: p.title, expected: `… ${want}` });
     }
     for (const re of PLACEHOLDERS) if (re.test(p.title)) add(pageLevel, { category: "SEO", severity: "error", rule: "title-placeholder", message: "Title contains placeholder text", found: p.title });
   }
   if (!p.metaDescription) add(pageLevel, { category: "SEO", severity: "error", rule: "meta-missing", message: "Missing meta description" });
-  else if (p.metaDescription.length > 160) add(pageLevel, { category: "SEO", severity: "info", rule: "meta-long", message: `Meta description is ${p.metaDescription.length} chars (aim ≤ 160)`, found: p.metaDescription });
+  // QA guidelines: 150–160 characters, the location, a call to action
+  else for (const i of descIssues(p.metaDescription, facts, { locationPage: isLocationPage(path), path })) add(pageLevel, { category: "SEO", severity: i.severity, rule: i.rule, message: i.message, found: p.metaDescription, expected: i.expected });
   if (p.h1s.length === 0) add(pageLevel, { category: "SEO", severity: "error", rule: "h1-missing", message: "Page has no H1 heading" });
-  if (p.h1s.length > 1) add(pageLevel, { category: "SEO", severity: "error", rule: "h1-multiple", message: `Page has ${p.h1s.length} H1 headings — use one`, found: p.h1s.join(" | ") });
+  if (p.h1s.length > 1) {
+    // H1s right after each other = one heading split by a new line in the text editor
+    const hs = p.headings.filter((h) => h.text);
+    const i0 = hs.findIndex((h) => h.level === 1);
+    const split = i0 >= 0 && hs.slice(i0, i0 + p.h1s.length).every((h) => h.level === 1);
+    add(pageLevel, { category: "SEO", severity: "error", rule: "h1-multiple", found: p.h1s.join(" | "),
+      message: split ? `The H1 is split into ${p.h1s.length} H1 elements — keep it one H1 and add the line break with <br> in the HTML (a new line in the text editor makes a second H1)` : `Page has ${p.h1s.length} H1 headings — use only one`,
+      expected: split ? p.h1s.join(" <br> ") : "one H1" });
+  }
 
   return out;
 }
@@ -381,7 +392,7 @@ export function sitewide(pages: { path: string; url: string; data: PageData }[],
     const m = new Map<string, string[]>();
     for (const p of pages) { const v = p.data[key]; if (v) m.set(v, [...(m.get(v) || []), p.path]); }
     for (const [v, paths] of m) if (paths.length > 1)
-      out.push({ ...site, category: "SEO", severity: "warning", rule: `duplicate-${key}`, message: `Duplicate ${label} on ${paths.length} pages: ${paths.join(", ")}`, found: v });
+      out.push({ ...site, category: "SEO", severity: key === "title" ? "error" : "warning", rule: `duplicate-${key}`, message: `Duplicate ${label} on ${paths.length} pages: ${paths.join(", ")}`, found: v });
   };
   dup("title", "title"); dup("metaDescription", "meta description");
   return out;

@@ -2,6 +2,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, ago, STATUS_LABEL, STATUS_TONE, type Member } from "./api";
+import { levelOf, LEVELS } from "@/lib/levels";
 import FactsEditor from "./FactsEditor";
 import DataCollection from "./DataCollection";
 import Prompts from "./Prompts";
@@ -71,9 +72,9 @@ export default function SiteView({ id, me }: { id: number; me: Me }) {
       {tab === "findings" && <AuditPanel site={site} lastRun={data.lastRun} aiAvailable={data.ai} onDone={load} onError={setErr} canManage={me.role !== "member"} />}
 
       {tab === "findings" && <div className="row">
-        <div className="stat"><b style={{ color: "var(--error)" }}>{open.filter((f) => f.severity === "error").length}</b><span>Errors</span></div>
-        <div className="stat"><b style={{ color: "var(--warning)" }}>{open.filter((f) => f.severity === "warning").length}</b><span>Warnings</span></div>
-        <div className="stat"><b style={{ color: "var(--info)" }}>{open.filter((f) => f.severity === "info").length}</b><span>Info</span></div>
+        <div className="stat"><b style={{ color: "var(--error)" }}>{open.filter((f) => levelOf(f) === "Breaking").length}</b><span>Breaking</span></div>
+        <div className="stat"><b style={{ color: "var(--warning)" }}>{open.filter((f) => levelOf(f) === "Major").length}</b><span>Major</span></div>
+        <div className="stat"><b style={{ color: "var(--info)" }}>{open.filter((f) => levelOf(f) === "Minor").length}</b><span>Minor</span></div>
         <div className="stat"><b style={{ color: "var(--ok)" }}>{findings.filter((f) => f.status === "done").length}</b><span>Done</span></div>
         <div className="stat"><b>{findings.filter((f) => f.status === "resolved").length}</b><span>Auto-resolved</span></div>
       </div>}
@@ -286,7 +287,7 @@ function FindingsTable({ siteId, site, findings, members, me, reload, onError }:
   const cats = [...new Set(rows.map((r) => r.category))].sort();
   const pages = [...new Set(rows.map((r) => r.page_path))].sort();
   const shown = rows.filter((r) =>
-    (f.status === "all" || r.status === f.status) && (!f.severity || r.severity === f.severity) && (!f.category || r.category === f.category) &&
+    (f.status === "all" || r.status === f.status) && (!f.severity || r.severity === f.severity || levelOf(r) === f.severity) && (!f.category || r.category === f.category) &&
     (!f.page || r.page_path === f.page) && (!f.source || r.source === f.source) &&
     (!f.who || (f.who === "me" ? r.assignee_id === me.id : f.who === "none" ? !r.assignee_id : String(r.assignee_id) === f.who)) &&
     (!f.q || [r.message, r.found, r.expected, r.selector, r.note].join(" ").toLowerCase().includes(f.q.toLowerCase())));
@@ -310,7 +311,7 @@ function FindingsTable({ siteId, site, findings, members, me, reload, onError }:
           <option value="open">Open</option><option value="done">Done</option><option value="ignored">Ignored</option><option value="resolved">Auto-resolved</option><option value="all">All</option>
         </select>
         <select value={f.severity} onChange={(e) => setF({ ...f, severity: e.target.value })}>
-          <option value="">Any severity</option><option value="error">Errors</option><option value="warning">Warnings</option><option value="info">Info</option>
+          <option value="">Any level</option>{LEVELS.map((l) => <option key={l} value={l}>{l}</option>)}<option disabled>──────</option><option value="error">Errors</option><option value="warning">Warnings</option><option value="info">Info</option>
         </select>
         <select value={f.category} onChange={(e) => setF({ ...f, category: e.target.value })}>
           <option value="">All categories</option>{cats.map((c) => <option key={c}>{c}</option>)}
@@ -382,7 +383,7 @@ function FindingsTable({ siteId, site, findings, members, me, reload, onError }:
                       {link ? <a href={link} target="_blank" rel="noreferrer" title="Open page and jump to the text">{r.page_path} ↗</a> : r.page_path}
                     </td>
                     <td style={{ minWidth: 320 }}>
-                      <div><span className={`badge ${r.severity}`}>{r.severity}</span> {r.message}</div>
+                      <div><span className={`badge ${r.severity}`} title={r.severity}>{levelOf(r)}</span> {r.message}</div>
                       {(r.found || r.expected) && (
                         <div className="diff">
                           {r.found && <><span className="k">Found</span><span className="found">{r.found}</span></>}

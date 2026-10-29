@@ -49,13 +49,21 @@ export type PageData = {
   /** Duda Business Info (structured data) */
   bizInfo?: BizInfo | null;
   /** UserWay accessibility widget installed; home-screen (apple-touch) icon set */
-  widgets?: { userway: boolean; touchIcon: boolean };
+  widgets?: { userway: boolean; touchIcon: boolean; /** the booking tool script's shop slug (data-shop), when the script is there */ bookingSlug?: string };
   /** Google Maps embeds */
   mapEmbeds?: { src: string; selector: string; global: boolean }[];
   /** phone numbers shown as text that aren't click-to-call links */
   unlinkedPhones?: { text: string; selector: string; global: boolean }[];
   /** text that is nearly invisible (same color as its background) */
   lowContrast?: { text: string; selector: string; global: boolean; colors: string }[];
+  /** text below the WCAG AA contrast ratio (4.5:1, large text 3:1) — "ratio|colors|size" */
+  contrast?: { text: string; selector: string; global: boolean; info: string }[];
+  /** places repeated in one list ("Tampa, FL" twice in the nearby cities) */
+  listDupes?: { text: string; selector: string; global: boolean }[];
+  /** links in FAQs / accordions that aren't underlined */
+  faqLinks?: { text: string; selector: string; global: boolean; href: string }[];
+  /** footer text smaller than 15px */
+  smallFooter?: { text: string; selector: string; global: boolean; size: number }[];
 };
 /** ShopGenie's custom "Book appointment" button — opens the booking widget, so it must not link anywhere. */
 export const BOOK_BTN = ".shopgenie-book-appt-bt";
@@ -299,10 +307,33 @@ export function extract(url: string, finalUrl: string, status: number, html: str
     for (const [k, v] of Object.entries(a)) if (v && (k === "id" || (k === "name" && (el as Element).name === "a") || /anchor/i.test(k))) idSet.add(String(v).toLowerCase().trim());
   });
   const ids = [...idSet].slice(0, 4000);
+  const contrast = $("[data-tek-wc]").map((_, el) => ({ text: clean($(el).text()).slice(0, 120), selector: selectorFor($, el as Element), global: $(el).closest(GLOBAL_SEL).length > 0, info: $(el).attr("data-tek-wc") || "" })).get().filter((x) => x.text.length > 1);
+  const faqLinks = $("[data-tek-nu]").map((_, el) => ({ text: clean($(el).text()).slice(0, 120), selector: selectorFor($, el as Element), global: $(el).closest(GLOBAL_SEL).length > 0, href: $(el).attr("href") || "" })).get().filter((x) => x.text.length > 0);
+  const smallFooter = $("[data-tek-fs]").map((_, el) => ({ text: clean($(el).text()).slice(0, 120), selector: selectorFor($, el as Element), global: true, size: Number($(el).attr("data-tek-fs")) || 0 })).get().filter((x) => x.text.length > 1);
+  const listDupes: { text: string; selector: string; global: boolean }[] = [];
+  $("ul,ol").each((_, ul) => {
+    if ($(ul).closest(GLOBAL_SEL).length) return;
+    const seenLi = new Map<string, number>();
+    $(ul).children("li").each((__, li) => {
+      const t = clean($(li).text());
+      if (!/^[A-Z][A-Za-z.'-]+(?: [A-Z][A-Za-z.'-]+){0,3}(?:,\s*[A-Z]{2})?$/.test(t)) return;
+      const k = t.toLowerCase().replace(/,\s*[a-z]{2}$/, "");
+      seenLi.set(k, (seenLi.get(k) || 0) + 1);
+      if (seenLi.get(k) === 2) listDupes.push({ text: t, selector: selectorFor($, ul as Element), global: false });
+    });
+  });
   const bizInfo = readBizInfo($);
   const widgets = {
     userway: /userway/i.test($("script[src]").map((_, el) => $(el).attr("src")).get().join(" ") + " " + $("script:not([src])").text().slice(0, 400_000)) || $(".uwy,#userwayAccessibilityIcon,[class*=userway i]").length > 0,
     touchIcon: $('link[rel~="apple-touch-icon"], link[rel~="apple-touch-icon-precomposed"]').length > 0,
+    // the booking tool (ShopGenie): script.setAttribute("data-shop","<slug>") or <script data-shop="<slug>">
+    bookingSlug: (() => {
+      const inline = $("script:not([src])").map((_, el) => $(el).text()).get().find((t) => /shopgenie\.io/i.test(t)) || "";
+      const m = inline.match(/setAttribute\(\s*["']data-shop["']\s*,\s*["']([^"']*)["']/i);
+      if (m) return m[1].trim();
+      const tag = $("script[src*='shopgenie' i][data-shop]").attr("data-shop");
+      return tag !== undefined ? tag.trim() : undefined;
+    })(),
   };
   const mapEmbeds = $("iframe").map((_, f) => ({ src: ($(f).attr("src") || $(f).attr("data-src") || "").trim(), selector: selectorFor($, f as Element), global: $(f).closest(GLOBAL_SEL).length > 0 })).get().filter((m) => MAPS_URL.test(m.src));
   // the same label twice at the top level of one menu ("FAQs" twice)
@@ -405,5 +436,5 @@ export function extract(url: string, finalUrl: string, status: number, html: str
     bookButtons.push({ selector: selectorFor($, el as Element), href: href === undefined ? null : href.trim(), text: clean($(el).text()) || clean($(el).attr("aria-label") || ""), global: isGlobal(el as Element) });
   });
 
-  return { url, finalUrl, status, title, metaDescription, h1s: headings.filter((h) => h.level === 1).map((h) => h.text), headings, blocks, images, links, html: "", formRecipients, bookButtons, navItems, navDupes, ids, bizInfo, widgets, mapEmbeds, unlinkedPhones, lowContrast };
+  return { url, finalUrl, status, title, metaDescription, h1s: headings.filter((h) => h.level === 1).map((h) => h.text), headings, blocks, images, links, html: "", formRecipients, bookButtons, navItems, navDupes, ids, bizInfo, widgets, mapEmbeds, unlinkedPhones, lowContrast, contrast, smallFooter, faqLinks, listDupes };
 }

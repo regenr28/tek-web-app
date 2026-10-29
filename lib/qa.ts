@@ -10,13 +10,14 @@ import { GLOBAL_PATH, sameBusiness, isLocationPage, type Finding, type Severity 
 import { REGION_NAMES } from "./collect";
 import type { SiteSnapshot } from "./duda";
 import { findLogo, logoLabel, DESIGNER, type Logo } from "./logos";
+import { hasLocation, AUTO_KEYWORD, AUTO_CATEGORY, categoryWords, norm, titleIssues, descIssues } from "./seoguide";
 
 export type QaCtx = {
   /** the link opens the site's homepage (no #section) */
   isHome: (abs: string) => boolean;
   /** the page path of an in-preview link ("/about-us"), or null for other sites */
   pathOf: (abs: string) => string | null;
-  gbp: { placeId: string; cid: string; name: string; reviews: number | null; rating: number | null };
+  gbp: { placeId: string; cid: string; name: string; reviews: number | null; rating: number | null; /** GBP primary category ("Auto repair shop") */ category?: string };
   /** vehicles they don't service ("Heavy diesel trucks", "Saab") */
   except: string[];
   /** e-mail for job applications (Data Collection "Email") */
@@ -188,12 +189,79 @@ export function auditPageQa(p: PageData, path: string, facts: Facts, ctx: QaCtx)
   // ---------- invisible text ----------
   for (const c of p.lowContrast || []) add(c, { category: "Design", severity: "error", rule: "text-invisible", message: "Text is nearly invisible — same color as its background", found: `${c.text} (${c.colors})` });
 
+  // ---------- readability (WCAG) ----------
+  const pairs = new Map<string, { c: NonNullable<PageData["contrast"]>[number]; n: number }>();
+  for (const c of p.contrast || []) { const [ratio, colors] = c.info.split("|"); const k = colors; const cur = pairs.get(k); if (cur) cur.n++; else pairs.set(k, { c: { ...c, info: `${ratio}|${colors}|${c.info.split("|")[2] || ""}` }, n: 1 }); }
+  for (const { c, n } of [...pairs.values()].slice(0, 6)) {
+    const [ratio, colors, size] = c.info.split("|");
+    add(c, { category: "Design", severity: "error", rule: "contrast-wcag", message: `Text contrast is ${ratio}:1 — WCAG needs at least 4.5:1 (3:1 for large text)${n > 1 ? ` (${n} places with these colors)` : ""}`, found: `“${c.text.slice(0, 60)}” — ${colors}${size ? `, ${size}` : ""}`, expected: "4.5:1 or more (check with the WebAIM Contrast Checker)" });
+  }
+  const smallF = p.smallFooter || [];
+  if (smallF.length) {
+    const min = Math.min(...smallF.map((x) => x.size));
+    add({ selector: smallF[0].selector, global: true }, { category: "Design", severity: "warning", rule: "footer-font-small", message: `Footer text is ${min}px — footer font size must be at least 15px`, found: smallF.slice(0, 4).map((x) => `“${x.text.slice(0, 40)}” ${x.size}px`).join(" · "), expected: "15px or larger" });
+  }
+  for (const l of (p.faqLinks || []).slice(0, 6)) add(l, { category: "Links", severity: "warning", rule: "faq-link-not-underlined", message: "Link inside the FAQs isn't underlined — links in accordions must be visible / underlined", found: `${l.text} → ${l.href}` });
+
+  // ---------- privacy policy page: the company name and an email are filled in ----------
+  if (/privacy/i.test(path)) {
+    const body = p.blocks.filter((b) => !b.global).map((b) => b.text).join("\n");
+    const nameOk = [facts.businessName, ...facts.altNames].filter(Boolean).some((n) => body.toLowerCase().includes(n.toLowerCase()) || body.toLowerCase().includes(n.toLowerCase().split(/\s+/).slice(0, 2).join(" ")));
+    if (facts.businessName && !nameOk) add(page, { category: "Content", severity: "error", rule: "privacy-company-missing", message: "The Privacy Policy doesn't name the company", expected: facts.businessName });
+    if (!/[\w.+-]+@[\w-]+\.[\w.]+/.test(body)) add(page, { category: "Content", severity: "error", rule: "privacy-email-missing", message: "The Privacy Policy has no contact email", expected: facts.emails[0] || "the shop's email" });
+    const ph = body.match(/\[(company|business|email|your)[^\]]{0,30}\]|\{\{[^}]+\}\}|company name here|your company|insert (email|name)/i);
+    if (ph) add(page, { category: "Content", severity: "error", rule: "privacy-placeholder", message: "The Privacy Policy still has placeholder text", found: ph[0] });
+  }
+
+  // ---------- financing: Affirm / Sunbit / Klarna use the library content — no "Apply now" links ----------
+  if (/affirm|sunbit|klarna/i.test(p.blocks.map((b) => b.text).join(" ")) && /financ|payment/i.test(path + " " + p.title))
+    for (const l of p.links) if (/apply\s*now/i.test(l.text) && !l.global) add(l, { category: "Content", severity: "error", rule: "financing-apply-now", message: "Affirm / Sunbit / Klarna financing must use the library content — no “Apply now” links", found: `${l.text} → ${l.href}` });
+
+  // ---------- service pages ----------
+  if (/^\/services?\/[^/]+/i.test(path)) {
+    if (p.h1s.some((h) => h.includes("&"))) add(page, { category: "SEO", severity: "error", rule: "h1-ampersand", message: "Service page H1 uses “&” — write “and” (collection formatting issue)", found: p.h1s.find((h) => h.includes("&")), expected: p.h1s.find((h) => h.includes("&"))?.replace(/\s*&\s*/g, " and ") });
+    for (const im of p.images) if (!im.global && /pexels|unsplash|pixabay/i.test(im.src)) add(im, { category: "Images", severity: "error", rule: "template-image", message: "Template image (Pexels) on a service page — use an image that matches the service", found: im.src.split("/").pop()?.split("?")[0] || im.src });
+  }
+
+  // ---------- nearby cities: no duplicates in the list ----------
+  const ld = p.listDupes || [];
+  if (ld.length) add({ selector: ld[0].selector, global: false }, { category: "Content", severity: "error", rule: "city-list-duplicate", message: `The cities list repeats ${ld.length === 1 ? "a city" : "cities"}: ${ld.map((x) => x.text).join(", ")}`, found: ld.map((x) => x.text).join(", ") });
+
   // ---------- headings ----------
   const hs = p.headings.filter((x) => x.text);
   if (hs.length && hs[0].level !== 1 && p.h1s.length) add({ selector: hs[0].selector, global: false }, { category: "SEO", severity: "error", rule: "h1-not-first", message: `The first heading is an H${hs[0].level} — the H1 must come first`, found: `H${hs[0].level}: ${hs[0].text.slice(0, 80)} · H1: ${p.h1s[0].slice(0, 60)}` });
+  // headings in order: H1 → H2 → H3… (no skipped level)
+  const skips: string[] = [];
+  // (customers' review cards are skipped — reviewer names are often small headings)
+  for (let i = 1; i < hs.length; i++) if (hs[i].level > hs[i - 1].level + 1 && !/review|testimonial/i.test(hs[i].selector)) skips.push(`H${hs[i - 1].level} “${hs[i - 1].text.slice(0, 40)}” → H${hs[i].level} “${hs[i].text.slice(0, 40)}”`);
+  if (skips.length) add({ selector: hs.find((h, i) => i > 0 && h.level > hs[i - 1].level + 1 && !/review|testimonial/i.test(h.selector))?.selector || "body", global: false }, { category: "SEO", severity: "error", rule: "heading-skip", message: `Headings skip a level (${skips.length}×) — keep the order H1 → H2 → H3 → H4`, found: skips.slice(0, 4).join(" · ") });
+  // the H1: [main keyword] + [location]
+  const h1 = p.h1s[0] || "";
+  if (h1 && facts.locations[0]?.city && !isLocationPage(path) && !hasLocation(h1, facts))
+    add(page, { category: "SEO", severity: "error", rule: "h1-no-location", message: "The H1 has no location — it should be [main keyword] + [location]", found: h1, expected: `${h1} in ${facts.locations[0].city}, ${String(facts.locations[0].state || "").toUpperCase()}` });
+  if (h1 && path === "/") {
+    const L0 = facts.locations[0];
+    const st = String(L0?.state || "").toUpperCase(), stName = REGION_NAMES[st] || "";
+    if (L0?.city && hasLocation(h1, facts) && st && !new RegExp(`(,\\s*|\\b)${st}\\b`).test(h1) && !(stName && new RegExp(`\\b${reEsc(stName)}\\b`, "i").test(h1)))
+      add(page, { category: "SEO", severity: "error", rule: "h1-home-city-state", message: "Homepage H1 should include [City, State]", found: h1, expected: `… ${L0.city}, ${st}` });
+    const cat = (ctx.gbp.category || "").trim();
+    if (cat && AUTO_CATEGORY.test(cat)) {
+      const w = categoryWords(cat), hw = ` ${norm(h1)} `;
+      if (w.length && !w.every((x) => hw.includes(` ${x} `) || hw.includes(` ${x}s `)))
+        add(page, { category: "SEO", severity: "warning", rule: "h1-home-keyword", message: `Homepage H1 doesn't use the Google Business Profile's primary category (“${cat}”) as its main keyword`, found: h1, expected: `${cat} in ${facts.locations[0]?.city || "[city]"}` });
+    } else if (!AUTO_KEYWORD.test(h1))
+      add(page, { category: "SEO", severity: "error", rule: "h1-home-keyword", message: "Homepage H1 has no main keyword (e.g. “Auto Repair Shop” or the primary service)", found: h1, expected: `Auto Repair Shop in ${facts.locations[0]?.city || "[city]"}` });
+    if (cat && !AUTO_CATEGORY.test(cat))
+      add(site, { category: "SEO", severity: "info", rule: "gbp-category", message: `The Google Business Profile's primary category is “${cat}” — advise the client to change it to their service category (e.g. Auto repair shop)`, found: cat });
+  }
   const seenH = new Map<string, number>();
   for (const x of hs) if (x.level === 2) seenH.set(x.text.toLowerCase(), (seenH.get(x.text.toLowerCase()) || 0) + 1);
-  for (const [t, n] of seenH) if (n > 1 && t.length > 3) add(page, { category: "Content", severity: "warning", rule: "heading-repeated", message: `${n} sections use the same heading`, found: t });
+  for (const [t, n] of seenH) if (n > 1 && t.length > 3 && path !== "/") add(page, { category: "Content", severity: "warning", rule: "heading-repeated", message: `${n} sections use the same heading`, found: t });
+  if (path === "/") {
+    const all = new Map<string, number>();
+    for (const x of hs) { const k = x.text.toLowerCase().replace(/\s+/g, " ").trim(); if (k.length > 3) all.set(k, (all.get(k) || 0) + 1); }
+    for (const [t, n] of all) if (n > 1) add(page, { category: "Content", severity: "error", rule: "heading-duplicate-home", message: `The homepage uses the same heading ${n} times — no duplicate headings on the homepage`, found: t });
+  }
 
   // ---------- text ----------
   const texts: { t: string; where: { selector: string; global: boolean }; heading: boolean }[] = [
@@ -424,6 +492,10 @@ export function sitewideQa(pages: { path: string; url: string; data: PageData }[
     out.push({ ...site, path: GLOBAL_PATH, url: home.url, selector: "footer", category: "Links", severity: "error", rule: "privacy-link-missing", message: "No Privacy Policy link on the site" });
   // accessibility widget + home-screen icon (checked on the homepage)
   if (home.data.widgets && !home.data.widgets.userway) out.push({ ...site, url: home.url, category: "SEO", severity: "error", rule: "userway-missing", message: "Accessibility by UserWay isn't installed" });
+  // booking tool script: the shop's slug (from the HubSpot deal) replaces the placeholder
+  const slug = home.data.widgets?.bookingSlug;
+  if (slug !== undefined && /^(shopgenie|searchgenie|placeholder|slug|shop-?slug|your[-_ ]?(shop|slug)|xxx+|test|)$/i.test(slug))
+    out.push({ ...site, url: home.url, selector: "head", category: "Site settings", severity: "error", rule: "booking-slug-placeholder", message: `The booking tool script still has the placeholder shop slug (data-shop="${slug}") — add the shop's slug from the HubSpot deal`, found: `data-shop="${slug}"`, expected: "the shop's slug from the HubSpot deal" });
   if (home.data.widgets && !home.data.widgets.touchIcon) out.push({ ...site, url: home.url, category: "SEO", severity: "warning", rule: "touch-icon-missing", message: "No mobile home-screen icon (Site settings → Mobile Device Home Screen Icon)" });
   // contact / careers forms send to the right inbox
   for (const p of pages) for (const r of p.data.formRecipients || []) {
@@ -566,6 +638,13 @@ export function siteSettingsQa(snap: SiteSnapshot, facts: Facts, ctx: QaCtx, opt
     if (st || sd) add({ path, category: "SEO", severity: "error", rule: "meta-same-as-home", message: `${where} uses the homepage's meta ${st && sd ? "title and description" : st ? "title" : "description"}`, found: st ? String(t) : String(d) });
   };
 
+  // QA guidelines for pages the crawler didn't open: title length, description length / location / call to action
+  const metas: { path: string; where: string; title: string; desc: string }[] = [];
+  const guide = (path: string, title: string, desc: string, where: string) => {
+    for (const i of titleIssues(title, {})) add({ path, category: "SEO", severity: i.severity, rule: i.rule, message: `${i.message} (${where})`, found: title, expected: i.expected });
+    for (const i of descIssues(desc, facts, { locationPage: isLocationPage(path), path })) add({ path, category: "SEO", severity: i.severity, rule: i.rule, message: `${i.message} (${where})`, found: desc, expected: i.expected });
+  };
+
   // every page's SEO — including pages nothing links to (the crawl only sees linked pages)
   for (const pg of snap.pages) {
     if (pg.type === "DYNAMIC") continue; // their SEO lives in the collection items (below)
@@ -574,6 +653,10 @@ export function siteSettingsQa(snap: SiteSnapshot, facts: Facts, ctx: QaCtx, opt
     if (!title) add({ path, category: "SEO", severity: "error", rule: "page-meta-title-blank", message: `Meta title is blank (page “${pg.title || path}”)` });
     if (!desc) add({ path, category: "SEO", severity: "error", rule: "page-meta-description-blank", message: `Meta description is blank (page “${pg.title || path}”)` });
     if (pg !== homePg) sameAsHome(path, `Page “${pg.title || path}”`, title, desc);
+    metas.push({ path, where: `page “${pg.title || path}”`, title, desc });
+    // QA guidelines: the meta title isn't the page's title (e.g. “Reviews”)
+    for (const i of titleIssues(title, { pageTitle: pg.title })) if (i.rule === "title-same-as-page-title") add({ path, category: "SEO", severity: i.severity, rule: i.rule, message: i.message, found: title, expected: i.expected });
+    if (!opts.crawled.has(path)) guide(path, title, desc, `page “${pg.title || path}”`);
     if (title && !opts.crawled.has(path)) {
       if (biz && !endsWithBusiness(title, names)) add({ path, category: "SEO", severity: "error", rule: "title-no-business-suffix", message: `Meta title must end with “ | ${biz}”`, found: title });
       const os = L?.state && !isLocationPage(path) && otherState(title, L.state);
@@ -593,6 +676,8 @@ export function siteSettingsQa(snap: SiteSnapshot, facts: Facts, ctx: QaCtx, opt
     if (mt !== undefined && !mt) add({ path: page, category: "SEO", severity: "error", rule: "item-meta-title-blank", message: `Meta title is blank (${where})` });
     if (md !== undefined && !md) add({ path: page, category: "SEO", severity: "error", rule: "item-meta-description-blank", message: `Meta description is blank (${where})` });
     sameAsHome(page, where, mt, md);
+    metas.push({ path: page, where, title: mt || "", desc: md || "" });
+    if (!opts.crawled.has(page)) guide(page, mt || "", md || "", where);
     if (mt && biz && !endsWithBusiness(mt, names)) add({ path: page, category: "SEO", severity: "error", rule: "item-meta-title-name", message: `Meta title must end with “ | ${biz}” (${where})`, found: mt });
     for (const v of [mt, md].filter(Boolean) as string[]) { const os = L?.state && otherState(v, L.state); if (os) { add({ path: page, category: "SEO", severity: "error", rule: "item-other-location", message: `${where} names another state (${os})`, found: v, expected: `${L!.city}, ${L!.state}` }); break; } }
     for (const [k, v] of Object.entries(d)) {
@@ -604,6 +689,12 @@ export function siteSettingsQa(snap: SiteSnapshot, facts: Facts, ctx: QaCtx, opt
     for (const ex of ctx.except) if (new RegExp(`\\b${ex.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}s?\\b`, "i").test(`${name} ${row.page_item_url || ""}`))
       add({ path: page, category: "Content", severity: "error", rule: "item-vehicle-not-serviced", message: `${where}: they don't service ${ex} (Jira)`, found: name });
     if (/lorem ipsum|placeholder text|your (business|company) name/i.test(all)) add({ path: page, category: "Content", severity: "error", rule: "item-placeholder", message: `${where} still has placeholder text` });
+  }
+  // QA guidelines: meta titles and descriptions are unique across ALL pages (service / vehicle items included)
+  for (const [k, label, sev] of [["title", "meta title", "error"], ["desc", "meta description", "error"]] as const) {
+    const m = new Map<string, typeof metas>();
+    for (const x of metas) { const v = x[k].trim().toLowerCase(); if (v) m.set(v, [...(m.get(v) || []), x]); }
+    for (const xs of m.values()) if (xs.length > 1) add({ category: "SEO", severity: sev, rule: k === "title" ? "duplicate-title" : "duplicate-metaDescription", message: `Duplicate ${label} on ${xs.length} pages: ${xs.slice(0, 8).map((x) => x.path).join(", ")}${xs.length > 8 ? "…" : ""}`, found: xs[0][k], expected: `a unique ${label} on every page` });
   }
   return out;
 }

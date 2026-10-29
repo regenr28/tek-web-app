@@ -179,7 +179,7 @@ export function auditPage(p: PageData, path: string, facts: Facts): Finding[] {
     }
     const dbl = t.match(/\b(\w{2,})\s+\1\b/i);
     if (dbl && !/^(that|had|is|bye|no|so|very|go)$/i.test(dbl[1]))
-      add(b, { category: "Spelling", severity: "warning", rule: "double-word", message: `Repeated word "${dbl[1]} ${dbl[1]}"`, found: excerpt(t, dbl.index ?? 0) });
+      add(b, { category: "Spelling", severity: "error", rule: "double-word", message: `Repeated word "${dbl[1]} ${dbl[1]}"`, found: excerpt(t, dbl.index ?? 0) });
     const nsp = t.match(/[a-z]{2}[.!?,][A-Z][a-z]{2,}/);
     if (nsp && !/\.(com|net|org|co)/i.test(nsp[0]))
       add(b, { category: "Spelling", severity: "info", rule: "missing-space", message: "Missing space after punctuation", found: excerpt(t, nsp.index ?? 0) });
@@ -245,7 +245,7 @@ export function auditPage(p: PageData, path: string, facts: Facts): Finding[] {
   const bizNames = [facts.businessName, ...facts.altNames].filter(Boolean);
   const bizName = facts.businessName;
   for (const img of p.images) {
-    if (img.decorative || img.review) continue; // reviewer photos / stars in a reviews widget aren't the site's images
+    if (img.decorative) continue; // (images in the reviews section are checked too — review icons need the business name)
     const file = img.src.split("/").pop()?.split("?")[0] || img.src;
     if (img.alt === null) {
       add(img, { category: "Images", severity: "error", rule: "alt-missing", message: "Image has no alt attribute", found: file });
@@ -297,10 +297,10 @@ export function auditPage(p: PageData, path: string, facts: Facts): Finding[] {
     }
     for (const re of PLACEHOLDERS) if (re.test(p.title)) add(pageLevel, { category: "SEO", severity: "error", rule: "title-placeholder", message: "Title contains placeholder text", found: p.title });
   }
-  if (!p.metaDescription) add(pageLevel, { category: "SEO", severity: "warning", rule: "meta-missing", message: "Missing meta description" });
+  if (!p.metaDescription) add(pageLevel, { category: "SEO", severity: "error", rule: "meta-missing", message: "Missing meta description" });
   else if (p.metaDescription.length > 160) add(pageLevel, { category: "SEO", severity: "info", rule: "meta-long", message: `Meta description is ${p.metaDescription.length} chars (aim ≤ 160)`, found: p.metaDescription });
-  if (p.h1s.length === 0) add(pageLevel, { category: "SEO", severity: "warning", rule: "h1-missing", message: "Page has no H1 heading" });
-  if (p.h1s.length > 1) add(pageLevel, { category: "SEO", severity: "info", rule: "h1-multiple", message: `Page has ${p.h1s.length} H1 headings`, found: p.h1s.join(" | ") });
+  if (p.h1s.length === 0) add(pageLevel, { category: "SEO", severity: "error", rule: "h1-missing", message: "Page has no H1 heading" });
+  if (p.h1s.length > 1) add(pageLevel, { category: "SEO", severity: "error", rule: "h1-multiple", message: `Page has ${p.h1s.length} H1 headings — use one`, found: p.h1s.join(" | ") });
 
   return out;
 }
@@ -342,7 +342,7 @@ export function sitewide(pages: { path: string; url: string; data: PageData }[],
     out.push({ ...site, category: "Contact info", severity: "warning", rule: "fact-email-absent", message: "Jira email isn't shown on the site and no contact form sends to it", expected: e });
   // contact forms (hidden "dmformsendto") should send to the shop's email
   if (facts.emails.length) for (const r of recipients) if (!facts.emails.some((e) => e.toLowerCase() === r))
-    out.push({ ...site, category: "Contact info", severity: "warning", rule: "form-recipient-mismatch", message: "A contact form sends to an email that isn't in Jira", found: r, expected: facts.emails.join(", ") });
+    out.push({ ...site, category: "Contact info", severity: "error", rule: "form-recipient-mismatch", message: "A contact form sends to an email that isn't in Jira", found: r, expected: facts.emails.join(", ") });
   if (facts.businessName && !allTextNorm.includes(normName(facts.businessName)) && !(bizKey(facts.businessName).length > 3 && allTextNorm.includes(bizKey(facts.businessName))))
     out.push({ ...site, category: "Business name", severity: "error", rule: "fact-name-absent", message: "Business name from Jira never appears on the site", expected: facts.businessName });
   const allStreetNorm = normStreet(allText);
@@ -358,7 +358,7 @@ export function sitewide(pages: { path: string; url: string; data: PageData }[],
   }
   for (const s of facts.services) {
     if (s.length > 2 && !allTextNorm.includes(normName(s)))
-      out.push({ ...site, category: "Content", severity: "info", rule: "fact-service-absent", message: "Service from Jira isn't mentioned on the site", expected: s });
+      out.push({ ...site, category: "Content", severity: "warning", rule: "fact-service-absent", message: "Service from Jira isn't mentioned on the site", expected: s });
   }
   for (const c of facts.citiesServed) {
     if (c.length > 2 && !allTextNorm.includes(normName(c)))

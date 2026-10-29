@@ -169,7 +169,8 @@ function AuditPanel({ site, lastRun, aiAvailable, onDone, onError, canManage }: 
       }
       setProgress((pr) => ({ ...pr, phase: "Site-wide checks & broken links" }));
       add("Running site-wide checks and broken-link scan…");
-      const f = await api<{ pages: number; open: number }>(`/api/sites/${site.id}/audit/finish`, { body: { runId: s.runId } });
+      const f = await api<{ pages: number; open: number; settings?: string }>(`/api/sites/${site.id}/audit/finish`, { body: { runId: s.runId, skipped: (s as { skipped?: string[] }).skipped || [] } });
+      if (f.settings) add(f.settings);
       setProgress({ done: total, total, phase: "Done" });
       add(`✓ Done — ${f.pages} pages, ${f.open} open finding(s).${cancel.current ? " (cancelled early)" : ""}`);
     } catch (e) { onError((e as Error).message); add("✗ " + (e as Error).message); }
@@ -494,7 +495,7 @@ function FactsTab({ site, dudaApi, ai, onSaved, onError }: { site: Site; dudaApi
     setBusy("");
   }
   async function loadDuda() {
-    setBusy("Fetching Duda Business Info…");
+    setBusy("Reading the site's Business Info…");
     try { setDuda((await api<{ facts: Facts }>(`/api/sites/${site.id}/duda`)).facts); } catch (e) { onError((e as Error).message); }
     setBusy("");
   }
@@ -536,8 +537,8 @@ function FactsTab({ site, dudaApi, ai, onSaved, onError }: { site: Site; dudaApi
 
       {dudaApi && (
         <div className="row">
-          <button className="sm" onClick={loadDuda} disabled={!!busy}>Compare with Duda Business Info (API)</button>
-          {duda && <button className="sm" onClick={() => { change(duda); setDuda(null); }}>Replace with Duda values</button>}
+          <button className="sm" onClick={loadDuda} disabled={!!busy}>Compare with the site's Business Info</button>
+          {duda && <button className="sm" onClick={() => { change(duda); setDuda(null); }}>Replace with the site's values</button>}
         </div>
       )}
       {duda && <DudaDiff jira={facts} duda={duda} />}
@@ -606,7 +607,7 @@ function DetailsTab({ site, me, onSave }: { site: Site; me: Me; onSave: (b: Reco
       <label className="field"><span>Live URL (after publish)</span><input value={f.live_url} onChange={(e) => setF({ ...f, live_url: e.target.value })} /></label>
       <div className="grid2">
         <label className="field"><span>Jira key</span><input value={f.jira_key} onChange={(e) => setF({ ...f, jira_key: e.target.value })} /></label>
-        <label className="field"><span>Duda site ID (only for API mode)</span><input value={f.duda_site_id} onChange={(e) => setF({ ...f, duda_site_id: e.target.value })} /></label>
+        <label className="field"><span>Duda site ID (from the Editor URL — used to read site settings)</span><input value={f.duda_site_id} onChange={(e) => setF({ ...f, duda_site_id: e.target.value })} /></label>
       </div>
       <label className="field"><span>Notes</span><textarea value={f.notes} onChange={(e) => setF({ ...f, notes: e.target.value })} /></label>
       <div className="row">

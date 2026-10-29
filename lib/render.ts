@@ -75,10 +75,60 @@ async function openPage(url: string, device: Device): Promise<{ page: Page; stat
   return { page, status: res?.status() ?? 0, finalUrl: page.url() };
 }
 
+/**
+ * Marks text that is nearly invisible — its color is (almost) the same as the background behind it, e.g. white text on a
+ * white section ("About Us address text is white and not visible"). Text over a photo / video / background image is
+ * skipped (it can't be judged from colors). Marked elements get data-tek-lc="<text color> on <background>".
+ */
+const MARK_LOW_CONTRAST = `(() => {
+  const parse = (c) => { const m = String(c).match(/rgba?\\(([^)]+)\\)/); if (!m) return null; const p = m[1].split(/[ ,/]+/).filter(Boolean).map(Number); return { r: p[0], g: p[1], b: p[2], a: p.length > 3 ? p[3] : 1 }; };
+  const lum = (c) => { const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); }; return 0.2126 * f(c.r) + 0.7152 * f(c.g) + 0.0722 * f(c.b); };
+  const over = (top, bot) => ({ r: top.r * top.a + bot.r * (1 - top.a), g: top.g * top.a + bot.g * (1 - top.a), b: top.b * top.a + bot.b * (1 - top.a), a: 1 });
+  const visuals = [];
+  for (const el of document.querySelectorAll("img,video,picture,canvas,iframe,svg")) { const r = el.getBoundingClientRect(); if (r.width > 20 && r.height > 20) visuals.push(r); }
+  let n = 0;
+  for (const el of document.querySelectorAll("body *")) {
+    if (++n > 6000) break;
+    const cs = getComputedStyle(el);
+    if (cs.backgroundImage && cs.backgroundImage !== "none") { const r = el.getBoundingClientRect(); if (r.width > 20 && r.height > 20) visuals.push(r); }
+  }
+  const out = [];
+  n = 0;
+  for (const el of document.querySelectorAll("p,span,a,li,h1,h2,h3,h4,h5,h6,td,div,strong,b,em,label,button")) {
+    if (++n > 5000) break;
+    if (![...el.childNodes].some((x) => x.nodeType === 3 && x.textContent.trim().length > 1)) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width < 2 || r.height < 2) continue;
+    const cs = getComputedStyle(el);
+    if (cs.visibility === "hidden" || Number(cs.opacity) < 0.1 || parseFloat(cs.fontSize) < 6) continue;
+    const fg = parse(cs.color); if (!fg) continue;
+    let bg = null, image = false;
+    const layers = [];
+    for (let x = el; x; x = x.parentElement) {
+      const s = getComputedStyle(x);
+      if (s.backgroundImage && s.backgroundImage !== "none") { image = true; break; }
+      const c = parse(s.backgroundColor);
+      if (c && c.a > 0) { layers.push(c); if (c.a >= 0.99) break; }
+    }
+    if (image) continue;
+    bg = { r: 255, g: 255, b: 255, a: 1 };
+    for (let i = layers.length - 1; i >= 0; i--) bg = over(layers[i], bg);
+    const text = over(fg, bg);
+    const L1 = lum(text), L2 = lum(bg);
+    const ratio = (Math.max(L1, L2) + 0.05) / (Math.min(L1, L2) + 0.05);
+    if (ratio >= 1.35) continue;
+    if (visuals.some((v) => !(v.right < r.left || v.left > r.right || v.bottom < r.top || v.top > r.bottom))) continue; // text over a picture
+    out.push(el);
+    el.setAttribute("data-tek-lc", "rgb(" + [text.r, text.g, text.b].map(Math.round).join(",") + ") on rgb(" + [bg.r, bg.g, bg.b].map(Math.round).join(",") + ")");
+    if (out.length > 40) break;
+  }
+})()`;
+
 /** The page's finished DOM (after scripts and lazy loading), for one device. */
 export async function renderHtml(url: string, device: Device): Promise<{ status: number; finalUrl: string; html: string }> {
   const { page, status, finalUrl } = await openPage(url, device);
   try {
+    await page.evaluate(MARK_LOW_CONTRAST).catch(() => {});
     return { status, finalUrl, html: await page.content() };
   } finally { await page.close().catch(() => {}); }
 }

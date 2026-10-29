@@ -8,11 +8,27 @@ export const UA =
 
 export type Block = { id: number; tag: string; text: string; selector: string; global: boolean; quote?: boolean };
 export type Img = { id: number; src: string; alt: string | null; selector: string; global: boolean; context: string; decorative: boolean;
+  /** the link the image sits in (null = not linked) */
+  href?: string | null;
+  /** the site logo (header image named / classed "logo") */
+  logo?: boolean;
   /** inside a customer-review widget (reviewer photos, star images) — not the site builder's to fix */
   review?: boolean };
 /** A header menu item (dropdown items too, even ones hidden until hover). */
 export type NavItem = { text: string; href: string; selector: string };
-export type Link = { href: string; abs: string; text: string; selector: string; global: boolean };
+export type Link = { href: string; abs: string; text: string; selector: string; global: boolean;
+  /** what an icon-only link is about: aria-label, title, class names, icon classes, image alt / file name */
+  hint?: string;
+  /** the text of the card / block the link sits in (e.g. the service name above a "Learn more" button) */
+  context?: string;
+  /** in the header menu */
+  nav?: boolean;
+  /** the link wraps an image / icon */
+  img?: boolean;
+  /** hidden on this device (e.g. dropdown, mobile-only copy) */
+  hidden?: boolean };
+/** Duda's "Business Info" (site settings) as published in the page's structured data. */
+export type BizInfo = { name: string; telephone: string; street: string; city: string; region: string; zip: string; url: string; email: string; hours: string[] };
 export type BookButton = { selector: string; href: string | null; text: string; global: boolean };
 export type PageData = {
   url: string; finalUrl: string; status: number; title: string; metaDescription: string; linkedFrom?: string;
@@ -26,6 +42,20 @@ export type PageData = {
   device?: string;
   /** the header menu (nav) items */
   navItems?: NavItem[];
+  /** labels that appear twice at the top level of one menu */
+  navDupes?: string[];
+  /** element ids / anchor names on the page (targets for #links) */
+  ids?: string[];
+  /** Duda Business Info (structured data) */
+  bizInfo?: BizInfo | null;
+  /** UserWay accessibility widget installed; home-screen (apple-touch) icon set */
+  widgets?: { userway: boolean; touchIcon: boolean };
+  /** Google Maps embeds */
+  mapEmbeds?: { src: string; selector: string; global: boolean }[];
+  /** phone numbers shown as text that aren't click-to-call links */
+  unlinkedPhones?: { text: string; selector: string; global: boolean }[];
+  /** text that is nearly invisible (same color as its background) */
+  lowContrast?: { text: string; selector: string; global: boolean; colors: string }[];
 };
 /** ShopGenie's custom "Book appointment" button — opens the booking widget, so it must not link anywhere. */
 export const BOOK_BTN = ".shopgenie-book-appt-bt";
@@ -205,6 +235,23 @@ export function selectorFor($: cheerio.CheerioAPI, el: Element): string {
 
 const clean = (s: string) => s.replace(/ /g, " ").replace(/[\t\r\n ]+/g, " ").trim();
 
+/** Duda Business Info → schema.org JSON-LD (LocalBusiness / AutoRepair …) on every page. */
+function readBizInfo($: cheerio.CheerioAPI): BizInfo | null {
+  const nodes: Record<string, unknown>[] = [];
+  const walk = (x: unknown) => { if (Array.isArray(x)) x.forEach(walk); else if (x && typeof x === "object") { const o = x as Record<string, unknown>; nodes.push(o); if (o["@graph"]) walk(o["@graph"]); } };
+  $("script[type='application/ld+json']").each((_, el) => { try { walk(JSON.parse($(el).text())); } catch { /* broken JSON-LD */ } });
+  const t = (o: Record<string, unknown>) => String(([] as unknown[]).concat(o["@type"] || "").join(" "));
+  const b = nodes.find((o) => /LocalBusiness|AutoRepair|AutomotiveBusiness|Organization|Store|AutoPartsStore|AutoBodyShop|TireShop/i.test(t(o)) && (o.telephone || o.address || o.name));
+  if (!b) return null;
+  const a = (typeof b.address === "object" && b.address ? b.address : {}) as Record<string, unknown>;
+  const s = (v: unknown) => (typeof v === "string" || typeof v === "number" ? String(v).trim() : "");
+  const hours = ([] as unknown[]).concat(b.openingHours || []).map(s).filter(Boolean)
+    .concat(([] as unknown[]).concat(b.openingHoursSpecification || []).map((h) => { const o = (h || {}) as Record<string, unknown>; return `${([] as unknown[]).concat(o.dayOfWeek || []).map((d) => s(d).replace(/^https?:\/\/schema\.org\//, "")).join(",")} ${s(o.opens)}-${s(o.closes)}`.trim(); }));
+  return { name: s(b.name), telephone: s(b.telephone), street: s(a.streetAddress), city: s(a.addressLocality), region: s(a.addressRegion), zip: s(a.postalCode), url: s(b.url), email: s(b.email), hours };
+}
+export const MAPS_URL = /(^|[./])google\.[a-z.]+\/maps|maps\.google\.|goo\.gl\/maps|maps\.app\.goo\.gl|g\.page\/|share\.google\//i;
+const PHONE_TEXT = /(?:\+?1[\s.-]?)?\(?\b[2-9]\d{2}\)?[\s.-]\d{3}[\s.-]\d{4}\b/;
+
 // ---------- extraction ----------
 
 export function extract(url: string, finalUrl: string, status: number, html: string, scope: Scope): PageData {
@@ -238,8 +285,62 @@ export function extract(url: string, finalUrl: string, status: number, html: str
       context: clean(container.text()).slice(0, 200),
       decorative: $i.attr("role") === "presentation" || $i.attr("aria-hidden") === "true" && $i.attr("alt") === "" || (w > 0 && w <= 2 && h > 0 && h <= 2) || /\/(pixel|spacer|blank)\.(gif|png)/i.test(abs),
       review: isReviewEl($, img as Element) || undefined,
+      href: $i.closest("a").length ? ($i.closest("a").attr("href") ?? null) : null,
+      logo: (/logo/i.test(`${$i.attr("alt") || ""} ${$i.attr("class") || ""} ${$i.attr("id") || ""} ${abs.split("/").pop() || ""} ${$i.parent().attr("class") || ""}`) && $i.closest("header,#hcontainer,.dmHeader,.dmHeaderContainer,#hamburger-header,#hamburger-header-container").length > 0)
+        || $i.closest("[data-element-type=logo],.logo-image,.dmLogo").length > 0 || undefined,
     });
   });
+
+  // anchor targets: ids, <a name>, Duda's data-anchor
+  // (any attribute with "anchor" in its name counts too — site builders name anchors differently)
+  const idSet = new Set<string>();
+  $("*").each((_, el) => {
+    const a = (el as Element).attribs || {};
+    for (const [k, v] of Object.entries(a)) if (v && (k === "id" || (k === "name" && (el as Element).name === "a") || /anchor/i.test(k))) idSet.add(String(v).toLowerCase().trim());
+  });
+  const ids = [...idSet].slice(0, 4000);
+  const bizInfo = readBizInfo($);
+  const widgets = {
+    userway: /userway/i.test($("script[src]").map((_, el) => $(el).attr("src")).get().join(" ") + " " + $("script:not([src])").text().slice(0, 400_000)) || $(".uwy,#userwayAccessibilityIcon,[class*=userway i]").length > 0,
+    touchIcon: $('link[rel~="apple-touch-icon"], link[rel~="apple-touch-icon-precomposed"]').length > 0,
+  };
+  const mapEmbeds = $("iframe").map((_, f) => ({ src: ($(f).attr("src") || $(f).attr("data-src") || "").trim(), selector: selectorFor($, f as Element), global: $(f).closest(GLOBAL_SEL).length > 0 })).get().filter((m) => MAPS_URL.test(m.src));
+  // the same label twice at the top level of one menu ("FAQs" twice)
+  const navDupes: string[] = [];
+  $(NAV_SEL).filter((_, n) => $(n).parents(NAV_SEL).length === 0).each((_, n) => {
+    const seenTop = new Map<string, number>();
+    $(n).find("a").each((__, a) => {
+      if ($(a).parentsUntil(n, "ul,ol").length > 1) return; // dropdown item
+      const t = clean($(a).text()).toLowerCase();
+      if (t) seenTop.set(t, (seenTop.get(t) || 0) + 1);
+    });
+    for (const [t, k] of seenTop) if (k > 1 && !navDupes.includes(t)) navDupes.push(t);
+  });
+  // links are read before hidden parts are removed: a "Book Now" that only shows on tablet still links somewhere
+  const isHiddenEl = (el: Element) => $(el).closest("[hidden],[style*='display:none'],[style*='display: none']").length > 0;
+  const links: Link[] = [];
+  $("a").each((_, a) => {
+    if ($(a).attr("href") === undefined) return; // Duda buttons wired to popups/booking widgets have no href
+    if ($(a).is(BOOK_BTN) || $(a).closest(BOOK_BTN).length) return; // checked separately (bookButtons)
+    if ($(a).closest("noscript,template,script").length) return;
+    const href = ($(a).attr("href") || "").trim();
+    let abs = href;
+    try { abs = new URL(href, finalUrl).toString(); } catch { /* keep */ }
+    const $a = $(a);
+    const hint = [$a.attr("aria-label"), $a.attr("title"), $a.attr("class"), $a.attr("data-element-type"), $a.attr("data-display-type"),
+      $a.find("[class]").map((__, k) => $(k).attr("class")).get().join(" "), $a.find("img").map((__, i) => `${$(i).attr("alt") || ""} ${($(i).attr("src") || "").split("/").pop()}`).get().join(" ")]
+      .filter(Boolean).join(" ").replace(/\s+/g, " ").slice(0, 300);
+    const own = clean($a.clone().find("script,style,svg").remove().end().text());
+    const card = $a.parents().filter((__, p) => { const t = clean($(p).text()); return t.length > own.length + 3 && t.length < 400; }).first();
+    const text = own || clean($a.attr("aria-label") || "") || clean($a.attr("title") || "");
+    const inNav = $a.closest(NAV_SEL).length > 0;
+    const ctxText = card.length && !inNav ? clean((card.html() || "").replace(/<(script|style|svg)[\s\S]*?<\/\1>/gi, " ").replace(/<[^>]+>/g, " ").replace(/&amp;/g, "&").replace(/&nbsp;|&#160;/g, " ")).slice(0, 200) : "";
+    links.push({ href, abs, text, selector: selectorFor($, a), global: $a.closest(GLOBAL_SEL).length > 0, hint, context: ctxText,
+      nav: ($a.closest(NAV_SEL).length > 0 && $a.closest("footer,#fcontainer,.dmFooter,.dmFooterContainer").length === 0) || undefined,
+      img: $a.find("img,svg,i,[class*=icon i]").length > 0 || undefined, hidden: isHiddenEl(a as Element) || undefined });
+  });
+  // text that the renderer measured as invisible (text color ≈ background color)
+  const lowContrast = $("[data-tek-lc]").map((_, el) => ({ text: clean($(el).text()).slice(0, 120), selector: selectorFor($, el as Element), global: $(el).closest(GLOBAL_SEL).length > 0, colors: $(el).attr("data-tek-lc") || "" })).get().filter((x) => x.text.length > 1);
 
   $(SKIP).remove();
   // Text on separate lines / in separate blocks must not run together ("APR.</p><p>See" is "APR. See", not "APR.See")
@@ -249,6 +350,7 @@ export function extract(url: string, finalUrl: string, status: number, html: str
   const isGlobal = (el: Element) => $(el).closest(GLOBAL_SEL).length > 0;
 
   const blocks: Block[] = [];
+  const unlinkedPhones: NonNullable<PageData["unlinkedPhones"]> = [];
   const seen = new Set<string>();
   // Customer reviews under a "Reviews" / "What our customers say" heading: everything in that heading's section, up to
   // the next heading of the same or a higher level (reviewer names are often smaller headings), is the customers' own text.
@@ -279,6 +381,9 @@ export function extract(url: string, finalUrl: string, status: number, html: str
             const inReviews = !!reviewArea && !global && !(hm && REVIEW_HEADING.test(text));
             const quote = /^["“].{20,}["”]$/s.test(text) || isReviewEl($, c) || inReviews;
             blocks.push({ id: blocks.length, tag, text, selector: selectorFor($, c), global, quote: quote || undefined });
+            const ph = text.match(PHONE_TEXT);
+            if (ph && !$(c).find("a[href^='tel:'],a[href^='TEL:']").length && !$(c).closest("a[href^='tel:'],a[href^='TEL:']").length && text.length < 300)
+              unlinkedPhones.push({ text: ph[0], selector: selectorFor($, c), global });
           }
         }
         if (FULL_TEXT_TAGS.has(tag)) continue;
@@ -300,15 +405,5 @@ export function extract(url: string, finalUrl: string, status: number, html: str
     bookButtons.push({ selector: selectorFor($, el as Element), href: href === undefined ? null : href.trim(), text: clean($(el).text()) || clean($(el).attr("aria-label") || ""), global: isGlobal(el as Element) });
   });
 
-  const links: Link[] = [];
-  $("a").each((_, a) => {
-    if ($(a).attr("href") === undefined) return; // Duda buttons wired to popups/booking widgets have no href
-    if ($(a).is(BOOK_BTN) || $(a).closest(BOOK_BTN).length) return; // checked separately (bookButtons)
-    const href = ($(a).attr("href") || "").trim();
-    let abs = href;
-    try { abs = new URL(href, finalUrl).toString(); } catch { /* keep */ }
-    links.push({ href, abs, text: clean($(a).text()) || clean($(a).attr("aria-label") || ""), selector: selectorFor($, a), global: isGlobal(a) });
-  });
-
-  return { url, finalUrl, status, title, metaDescription, h1s: headings.filter((h) => h.level === 1).map((h) => h.text), headings, blocks, images, links, html: "", formRecipients, bookButtons, navItems };
+  return { url, finalUrl, status, title, metaDescription, h1s: headings.filter((h) => h.level === 1).map((h) => h.text), headings, blocks, images, links, html: "", formRecipients, bookButtons, navItems, navDupes, ids, bizInfo, widgets, mapEmbeds, unlinkedPhones, lowContrast };
 }

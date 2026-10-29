@@ -452,13 +452,7 @@ export function siteSettingsQa(snap: SiteSnapshot, facts: Facts, ctx: QaCtx, opt
   const L = facts.locations[0];
 
   // labels
-  const labels = (snap.site.labels || []).map((l) => String(l.name || "").trim()).filter(Boolean);
-  if (!labels.length) add({ category: "Site settings", severity: "error", rule: "site-labels-blank", message: "Site labels are blank", expected: opts.templateNumber ? `the template number (${opts.templateNumber.padStart(2, "0")}) and the site's other labels` : "the site's labels" });
-  else if (opts.templateNumber) {
-    const nums = labels.filter((l) => /^\d{1,3}$/.test(l));
-    if (!nums.length) add({ category: "Site settings", severity: "warning", rule: "site-label-template", message: "No template-number label", found: labels.join(", "), expected: opts.templateNumber.padStart(2, "0") });
-    else if (!nums.some((n) => Number(n) === Number(opts.templateNumber))) add({ category: "Site settings", severity: "error", rule: "site-label-template", message: `Site label says template ${nums.join(", ")} — Jira's template is #${Number(opts.templateNumber)}`, found: labels.join(", "), expected: opts.templateNumber.padStart(2, "0") });
-  }
+  out.push(...labelChecks(snap, facts, ctx, opts).map((f) => ({ path: SETTINGS_PATH, url: opts.homeUrl, selector: "", source: "rule" as const, global: true, ...f })));
 
   // site-wide SEO
   const seo = snap.site.site_seo || {};
@@ -530,6 +524,18 @@ export function siteSettingsQa(snap: SiteSnapshot, facts: Facts, ctx: QaCtx, opt
   for (const t of texts.values()) if (/lorem ipsum|placeholder|your (business|company) name|\b(xxx|tbd)\b/i.test(t.text))
     add({ category: "Business text", severity: "error", rule: "text-placeholder", message: `Business text “${t.label}” is still placeholder text`, found: t.text.slice(0, 140) });
 
+  if (snap.pages.length && !snap.pages.some((p) => p.type !== "DYNAMIC" && /privacy/i.test(`${p.path || ""} ${p.title || ""}`)))
+    add({ category: "Site settings", severity: "error", rule: "privacy-page-missing", message: "The site has no Privacy Policy page", expected: "a Privacy Policy page" });
+
+  // pages that reuse the homepage's meta title / description (common on Old Builds)
+  const homePg = snap.pages.find((p) => p.type !== "DYNAMIC" && (p.path === "home" || !p.path));
+  const lc = (x?: string) => String(x || "").replace(/\s+/g, " ").trim().toLowerCase();
+  const homeT = lc(homePg?.seo?.title), homeD = lc(homePg?.seo?.description);
+  const sameAsHome = (path: string, where: string, t?: string, d?: string) => {
+    const st = !!homeT && lc(t) === homeT, sd = !!homeD && lc(d) === homeD;
+    if (st || sd) add({ path, category: "SEO", severity: "error", rule: "meta-same-as-home", message: `${where} uses the homepage's meta ${st && sd ? "title and description" : st ? "title" : "description"}`, found: st ? String(t) : String(d) });
+  };
+
   // every page's SEO — including pages nothing links to (the crawl only sees linked pages)
   for (const pg of snap.pages) {
     if (pg.type === "DYNAMIC") continue; // their SEO lives in the collection items (below)
@@ -537,6 +543,7 @@ export function siteSettingsQa(snap: SiteSnapshot, facts: Facts, ctx: QaCtx, opt
     const title = String(pg.seo?.title || "").trim(), desc = String(pg.seo?.description || "").trim();
     if (!title) add({ path, category: "SEO", severity: "error", rule: "page-meta-title-blank", message: `Meta title is blank (page “${pg.title || path}”)` });
     if (!desc) add({ path, category: "SEO", severity: "error", rule: "page-meta-description-blank", message: `Meta description is blank (page “${pg.title || path}”)` });
+    if (pg !== homePg) sameAsHome(path, `Page “${pg.title || path}”`, title, desc);
     if (title && !opts.crawled.has(path)) {
       if (biz && !endsWithBusiness(title, names)) add({ path, category: "SEO", severity: "error", rule: "title-no-business-suffix", message: `Meta title must end with “ | ${biz}”`, found: title });
       const os = L?.state && !isLocationPage(path) && otherState(title, L.state);
@@ -555,6 +562,7 @@ export function siteSettingsQa(snap: SiteSnapshot, facts: Facts, ctx: QaCtx, opt
     const mt = s("meta title"), md = s("meta description");
     if (mt !== undefined && !mt) add({ path: page, category: "SEO", severity: "error", rule: "item-meta-title-blank", message: `Meta title is blank (${where})` });
     if (md !== undefined && !md) add({ path: page, category: "SEO", severity: "error", rule: "item-meta-description-blank", message: `Meta description is blank (${where})` });
+    sameAsHome(page, where, mt, md);
     if (mt && biz && !endsWithBusiness(mt, names)) add({ path: page, category: "SEO", severity: "error", rule: "item-meta-title-name", message: `Meta title must end with “ | ${biz}” (${where})`, found: mt });
     for (const v of [mt, md].filter(Boolean) as string[]) { const os = L?.state && otherState(v, L.state); if (os) { add({ path: page, category: "SEO", severity: "error", rule: "item-other-location", message: `${where} names another state (${os})`, found: v, expected: `${L!.city}, ${L!.state}` }); break; } }
     for (const [k, v] of Object.entries(d)) {
@@ -569,6 +577,77 @@ export function siteSettingsQa(snap: SiteSnapshot, facts: Facts, ctx: QaCtx, opt
   }
   return out;
 }
+/**
+ * The site labels, by the team's label rules:
+ *   01, 02… template design · Lite (homepage + Image Credits + Privacy Policy only) / PRO (advanced, unlimited pages)
+ *   SL (1 location) / MSO (more than 1) · PPW (privacy widget) / CPPP (custom privacy page) · HUB · Custom · SEO
+ *   OB (old build) · DEL (can be deleted) · UPG (has a previous version) · LEFT (churned client)
+ */
+export const KNOWN_LABELS = ["Lite", "PRO", "SL", "MSO", "HUB", "PPW", "CPPP", "Custom", "SEO", "OB", "DEL", "UPG", "LEFT"];
+type LabelFinding = Pick<Finding, "category" | "severity" | "rule" | "message"> & { found?: string; expected?: string };
+export function labelChecks(snap: SiteSnapshot, facts: Facts, ctx: Pick<QaCtx, "projectType">, opts: { templateNumber: string; crawled: Set<string> }): LabelFinding[] {
+  const out: LabelFinding[] = [];
+  const labels = (snap.site.labels || []).map((l) => String(l.name || "").trim()).filter(Boolean);
+  const T = opts.templateNumber ? opts.templateNumber.padStart(2, "0") : "";
+  if (!labels.length) {
+    out.push({ category: "Site settings", severity: "error", rule: "site-labels-blank", message: "Site labels are blank", expected: T ? `the template number (${T}) and the site's other labels` : "the site's labels" });
+    return out;
+  }
+  const all = labels.join(", ");
+  const has = (n: string) => labels.some((l) => l.toLowerCase() === n.toLowerCase() || (n === "OB" && /^old builds?$/i.test(l)));
+  const A = (f: Omit<LabelFinding, "category">) => out.push({ category: "Site settings", found: all, ...f });
+
+  // template number
+  const nums = labels.filter((l) => /^\d{1,3}$/.test(l));
+  if (nums.length > 1) A({ severity: "error", rule: "site-label-template", message: `More than one template-number label (${nums.join(", ")})`, expected: T || "one template number" });
+  if (T) {
+    if (!nums.length) A({ severity: "error", rule: "site-label-template", message: "No template-number label", expected: T });
+    else if (!nums.some((n) => Number(n) === Number(T))) A({ severity: "error", rule: "site-label-template", message: `Site label says template ${nums.join(", ")} — Jira's template is #${Number(T)}`, expected: T });
+  } else if (!nums.length) A({ severity: "warning", rule: "site-label-template", message: "No template-number label (01, 02…)" });
+
+  // package: Lite or PRO (Basic = Lite, Advanced = PRO)
+  const lite = has("Lite"), pro = has("PRO");
+  const wantPkg = ctx.projectType === "basic" ? "Lite" : ctx.projectType === "advanced" ? "PRO" : "";
+  if (lite && pro) A({ severity: "error", rule: "site-label-package", message: "Both Lite and PRO labels — a site has one package", expected: wantPkg || "Lite or PRO" });
+  else if (!lite && !pro) A({ severity: wantPkg ? "error" : "warning", rule: "site-label-package", message: "No package label (Lite or PRO)", expected: wantPkg || "Lite or PRO" });
+  else if (wantPkg && !has(wantPkg)) A({ severity: "error", rule: "site-label-package", message: `Labelled ${lite ? "Lite" : "PRO"} but the Jira project is ${ctx.projectType === "basic" ? "Basic" : "Advanced"}`, expected: wantPkg });
+  // Lite = only the homepage, Image Credits and Privacy Policy — no other pages, no blog
+  if (lite && !pro) {
+    const extra = snap.pages.filter((p) => {
+      const k = `${p.path || ""} ${p.title || ""}`.toLowerCase();
+      if (p.type === "DYNAMIC") return true;
+      return !(p.path === "home" || !p.path || /\bcredit/.test(k) || /privacy/.test(k));
+    });
+    if (extra.length) A({ severity: "error", rule: "lite-extra-pages", message: `Lite site has ${extra.length} page(s) besides the homepage, Image Credits and Privacy Policy`, found: extra.map((p) => `/${(p.path || "").replace(/^\/+/, "").replace("~page-item~", "…")}${p.type === "DYNAMIC" ? ` (${p.collection_name || "collection"} pages)` : ""}`).slice(0, 12).join(", "), expected: "Homepage, Image Credits and Privacy Policy only" });
+  }
+
+  // locations: SL (1) or MSO (more than 1)
+  const sl = has("SL"), mso = has("MSO");
+  const extraLocs = (snap.content.additional_locations || []).length;
+  const nLocs = Math.max(facts.locations.length, snap.content.location_data ? 1 + extraLocs : extraLocs);
+  const wantLoc = ctx.projectType === "mso" || nLocs > 1 ? "MSO" : nLocs === 1 ? "SL" : "";
+  const why = wantLoc === "MSO" ? (nLocs > 1 ? `${nLocs} locations` : "the Jira project is MSO") : "1 location";
+  if (sl && mso) A({ severity: "error", rule: "site-label-location", message: "Both SL and MSO labels", expected: wantLoc ? `${wantLoc} (${why})` : "SL or MSO" });
+  else if (!sl && !mso) A({ severity: wantLoc ? "error" : "warning", rule: "site-label-location", message: "No location label (SL or MSO)", expected: wantLoc ? `${wantLoc} (${why})` : "SL or MSO" });
+  else if (wantLoc && !has(wantLoc)) A({ severity: "error", rule: "site-label-location", message: `Labelled ${sl ? "SL" : "MSO"} — expected ${wantLoc} (${why})`, expected: wantLoc });
+
+  // privacy policy: PPW (widget) or CPPP (custom page)
+  const ppw = has("PPW"), cppp = has("CPPP");
+  if (ppw && cppp) A({ severity: "error", rule: "site-label-privacy", message: "Both PPW and CPPP labels — PPW is the widget, CPPP is a custom page (or the page has more content)", expected: "PPW or CPPP" });
+  else if (!ppw && !cppp) A({ severity: "error", rule: "site-label-privacy", message: "No privacy-policy label (PPW or CPPP)", expected: "PPW or CPPP" });
+
+  // status labels
+  if (has("DEL")) A({ severity: "warning", rule: "site-label-del", message: "This site is labelled DEL (can be deleted: test / mistake / replaced) — make sure it's the right site to audit" });
+  if (has("LEFT")) A({ severity: "warning", rule: "site-label-left", message: "This site is labelled LEFT (churned client — no longer active)" });
+  if (has("UPG")) A({ severity: "info", rule: "site-label-upg", message: "This site is labelled UPG (it has a previous version) — check nothing was left over from the old build" });
+  if (has("OB")) A({ severity: "info", rule: "site-label-ob", message: "Old Build (OB): check every resolution — phone number everywhere (unlink a phone that's also linked), service pages, icons and cards per resolution, hero sections per resolution, theme colors / fonts" });
+
+  // labels not in the list
+  for (const l of labels) if (!/^\d{1,3}$/.test(l) && !KNOWN_LABELS.some((k) => k.toLowerCase() === l.toLowerCase()) && !/^old builds?$/i.test(l))
+    out.push({ category: "Site settings", severity: "warning", rule: "site-label-unknown", message: `Unknown site label “${l}”`, found: l, expected: `numbers (01, 02…) or ${KNOWN_LABELS.join(", ")}` });
+  return out;
+}
+
 /** "/services/oil-change" for a collection item (from the dynamic page that shows the collection). */
 function pagesFor(snap: SiteSnapshot, collection: string, item?: string) {
   const pg = snap.pages.find((p) => p.type === "DYNAMIC" && p.collection_name === collection);
